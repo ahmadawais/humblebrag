@@ -4,8 +4,11 @@ Blazing-fast npm download stats for a user or a set of packages. Single Rust bin
 
 ```sh
 ./scripts/install.sh            # release build → ~/.local/bin/npmstat
-npmstat user ahmadawais --html report.html --json report.json
-npmstat pkg react,vue,svelte --from 2024-01-01
+npmstat ahmadawais              # user or package, auto-detected; full history
+npmstat command-code
+npmstat react vue svelte        # several packages, combined
+npmstat ~vue                    # force user when a name is both
+npmstat ahmadawais --html report.html --json report.json --from 2024-01-01
 ```
 
 ## Why it's faster than npm-stat.com

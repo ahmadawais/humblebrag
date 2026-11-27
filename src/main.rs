@@ -293,6 +293,54 @@ async fn last_available(client: &reqwest::Client, ttl: u64) -> Option<NaiveDate>
     parse_date(&c.end)
 }
 
+async fn package_exists(client: &reqwest::Client, pkg: &str) -> bool {
+    let url = format!("{REGISTRY}/{}", pkg.replace('/', "%2F"));
+    client
+        .head(&url)
+        .header("accept", "application/vnd.npm.install-v1+json")
+        .send()
+        .await
+        .map_or(false, |r| r.status().is_success())
+}
+
+/// Figure out what the user meant: `~name` = npm user, `@scope/x` or several
+/// names = packages, a single bare name = check both (package wins, with a hint).
+async fn resolve(client: &reqwest::Client, explicit: Option<String>, names: Vec<String>) -> (String, String, Vec<String>) {
+    let die = |e: String| -> ! {
+        eprintln!("{e}");
+        std::process::exit(1)
+    };
+    let user = |n: &str| n.trim_start_matches('~').to_string();
+    match explicit.as_deref() {
+        Some("user") => {
+            let u = user(&names[0]);
+            let p = user_packages(client, &u).await.unwrap_or_else(|e| die(e));
+            return ("user".into(), u, p);
+        }
+        Some(_) => return ("pkg".into(), names.join(","), names),
+        None => {}
+    }
+    if names.len() > 1 || names[0].starts_with('@') {
+        return ("pkg".into(), names.join(","), names);
+    }
+    if names[0].starts_with('~') {
+        let u = user(&names[0]);
+        let p = user_packages(client, &u).await.unwrap_or_else(|e| die(e));
+        return ("user".into(), u, p);
+    }
+    let n = names[0].clone();
+    let (is_pkg, as_user) = tokio::join!(package_exists(client, &n), user_packages(client, &n));
+    match (is_pkg, as_user) {
+        (true, Ok(p)) => {
+            eprintln!("  {n} is a package (also an npm user with {} packages: npmstat ~{n})", p.len());
+            ("pkg".into(), n.clone(), vec![n])
+        }
+        (true, Err(_)) => ("pkg".into(), n.clone(), vec![n]),
+        (false, Ok(p)) => ("user".into(), n, p),
+        (false, Err(_)) => die(format!("'{n}' is neither an npm package nor an npm user")),
+    }
+}
+
 // ---------- fetch planning ----------
 struct Job {
     pkgs: Vec<String>,
@@ -403,7 +451,8 @@ async fn fetch_all(
     // Build jobs.
     let mut jobs = vec![];
     for ((fetch_from, scoped), list) in &need {
-        if *scoped {
+        // Scoped (no bulk support) or a lone package: single-package windows are longer.
+        if *scoped || list.len() == 1 {
             for p in list {
                 let start = born.get(p).map_or(*fetch_from, |b| (*b).max(*fetch_from));
                 for (s, e) in windows(start, to, SINGLE_DAYS) {
@@ -499,12 +548,16 @@ fn usage() -> ! {
         "npmstat — blazing-fast npm download stats
 
 USAGE:
-  npmstat user <username> [options]
-  npmstat pkg  <name>[,<name>...] [options]
+  npmstat <name> [options]          package or user, auto-detected
+  npmstat ~<user> [options]         force user (all their packages)
+  npmstat <pkg> <pkg>... [options]  several packages, combined
+  npmstat user|pkg <name> [options] explicit mode
+
+  Full history (2015-01-10 → latest day npm has) by default.
 
 OPTIONS:
   --from YYYY-MM-DD   start date (default 2015-01-10, first day npm has data)
-  --to   YYYY-MM-DD   end date   (default yesterday)
+  --to   YYYY-MM-DD   end date   (default: latest day npm has data)
   --json <file>       write full JSON (daily totals + per-package)
   --html <file>       write a self-contained interactive HTML report
   --top <n>           packages to list (default 25)
@@ -523,10 +576,20 @@ OPTIONS:
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() < 2 {
+    if args.is_empty() || matches!(args[0].as_str(), "-h" | "--help" | "help") {
         usage();
     }
-    let (mode, target) = (args[0].as_str(), args[1].clone());
+    // Optional explicit mode, then names (anything before the first flag).
+    let explicit = matches!(args[0].as_str(), "user" | "pkg").then(|| args[0].clone());
+    let mut i = explicit.is_some() as usize;
+    let mut names: Vec<String> = vec![];
+    while i < args.len() && !args[i].starts_with('-') {
+        names.extend(args[i].split(|c: char| c == ',' || c.is_whitespace()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+        i += 1;
+    }
+    if names.is_empty() {
+        usage();
+    }
     let today = Utc::now().date_naive();
     let mut from = epoch();
     let mut to = today - Duration::days(1);
@@ -536,7 +599,6 @@ async fn main() {
     let mut ttl: u64 = 6 * 3600;
     let (mut rate, mut burst) = (DEFAULT_RATE, DEFAULT_BURST);
     let mut exact = false;
-    let mut i = 2;
     while i < args.len() {
         let val = || args.get(i + 1).cloned().unwrap_or_else(|| usage());
         match args[i].as_str() {
@@ -591,13 +653,8 @@ async fn main() {
         }
         last_available(&client, ttl.min(3600)).await
     };
-    let list = async {
-        match mode {
-            "user" => Some(user_packages(&client, &target).await),
-            _ => None,
-        }
-    };
-    let (last_day, listed) = tokio::join!(last_day, list);
+    let (last_day, (mode, target, listed)) = tokio::join!(last_day, resolve(&client, explicit, names));
+    let mode = mode.as_str();
     if let Some(d) = last_day {
         to = d;
     }
@@ -605,17 +662,7 @@ async fn main() {
         eprintln!("--from is after the last available day ({to})");
         std::process::exit(2);
     }
-    let pkgs: Vec<String> = match mode {
-        "user" => match listed.unwrap() {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("{e}");
-                std::process::exit(1)
-            }
-        },
-        "pkg" => target.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
-        _ => usage(),
-    };
+    let pkgs = listed;
     let t_list = t0.elapsed();
     eprintln!("  {} packages ({:.0?})", pkgs.len(), t_list);
 

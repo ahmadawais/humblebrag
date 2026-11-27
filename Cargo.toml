@@ -1,8 +1,10 @@
 [package]
-name = "npmstat"
+name = "humblebrag"
 version = "0.1.0"
 edition = "2021"
-description = "Blazing-fast npm download stats for users and packages"
+description = "npm download stats for a user or a set of packages"
+repository = "https://github.com/ahmadawais/humblebrag"
+authors = ["Ahmad Awais"]
 license = "MIT"
 
 [dependencies]

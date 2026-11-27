@@ -1,4 +1,4 @@
 target/
-*.json
-*.html
-!src/*.html
+/*.json
+/*.html
+npm-dist/

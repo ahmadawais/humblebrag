@@ -1,4 +1,4 @@
-//! npmstat — blazing-fast npm download stats.
+//! humblebrag: npm download stats for a user or a set of packages.
 //!
 //! Speed tricks:
 //! * Bulk API: up to 128 unscoped packages × 365 days per request.
@@ -80,7 +80,7 @@ fn cache_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache"));
     // --exact keeps its own cache: pruned caches have zeros before first publish.
-    base.join(if EXACT.load(Ordering::Relaxed) { "npmstat/exact" } else { "npmstat" })
+    base.join(if EXACT.load(Ordering::Relaxed) { "humblebrag/exact" } else { "humblebrag" })
 }
 static EXACT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 fn cache_path(pkg: &str) -> PathBuf {
@@ -332,7 +332,7 @@ async fn resolve(client: &reqwest::Client, explicit: Option<String>, names: Vec<
     let (is_pkg, as_user) = tokio::join!(package_exists(client, &n), user_packages(client, &n));
     match (is_pkg, as_user) {
         (true, Ok(p)) => {
-            eprintln!("  {n} is a package (also an npm user with {} packages: npmstat ~{n})", p.len());
+            eprintln!("  {n} is a package (also an npm user with {} packages: humblebrag ~{n})", p.len());
             ("pkg".into(), n.clone(), vec![n])
         }
         (true, Err(_)) => ("pkg".into(), n.clone(), vec![n]),
@@ -545,13 +545,13 @@ fn fmt(n: u64) -> String {
 
 fn usage() -> ! {
     eprintln!(
-        "npmstat — blazing-fast npm download stats
+        "humblebrag: npm download stats for a user or packages
 
 USAGE:
-  npmstat <name> [options]          package or user, auto-detected
-  npmstat ~<user> [options]         force user (all their packages)
-  npmstat <pkg> <pkg>... [options]  several packages, combined
-  npmstat user|pkg <name> [options] explicit mode
+  humblebrag <name> [options]          package or user, auto-detected
+  humblebrag ~<user> [options]         force user (all their packages)
+  humblebrag <pkg> <pkg>... [options]  several packages, combined
+  humblebrag user|pkg <name> [options] explicit mode
 
   Full history (2015-01-10 → latest day npm has) by default.
 
@@ -568,7 +568,8 @@ OPTIONS:
   --exact             don't skip windows before a package's first publish
                       (counts downloads of earlier, unpublished owners of a reused name)
   --fresh             refetch recent days now (finalized history still cached)
-  --no-cache          ignore and don't write the on-disk cache"
+  --no-cache          ignore and don't write the on-disk cache
+  -V, --version       print version"
     );
     std::process::exit(2)
 }
@@ -578,6 +579,10 @@ async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() || matches!(args[0].as_str(), "-h" | "--help" | "help") {
         usage();
+    }
+    if matches!(args[0].as_str(), "-V" | "--version") {
+        println!("humblebrag {}", env!("CARGO_PKG_VERSION"));
+        return;
     }
     // Optional explicit mode, then names (anything before the first flag).
     let explicit = matches!(args[0].as_str(), "user" | "pkg").then(|| args[0].clone());
@@ -640,7 +645,7 @@ async fn main() {
     BURST.store(burst, Ordering::Relaxed);
     let t0 = Instant::now();
     let client = reqwest::Client::builder()
-        .user_agent("npmstat-rs/0.1")
+        .user_agent(concat!("humblebrag/", env!("CARGO_PKG_VERSION")))
         .pool_max_idle_per_host(conc)
         .timeout(std::time::Duration::from_secs(60))
         .build()

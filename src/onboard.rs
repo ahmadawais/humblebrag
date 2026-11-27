@@ -82,21 +82,28 @@ pub fn run() {
     eprintln!();
     eprintln!("  Sites read automatically (leave empty to skip):");
     for (site, hint) in [
+        ("x", "X handle"),
+        ("instagram", "Instagram handle"),
+        ("linkedin", "LinkedIn handle (linkedin.com/in/<handle>)"),
         ("youtube", "YouTube handle, like @name"),
         ("bluesky", "Bluesky handle, like name.bsky.social"),
         ("mastodon", "Mastodon account, like user@mastodon.social"),
         ("stackoverflow", "Stack Overflow user id (the number in your profile URL)"),
         ("hackernews", "Hacker News username"),
+        ("reddit", "Reddit username"),
     ] {
-        match ask(hint, &val_str(p.social.get(site))).as_str() {
-            "" => p.social.remove(site),
+        // A number here was typed in by hand before; offer to switch to a handle.
+        let cur = p.social.get(site).filter(|v| v.is_string() || site == "stackoverflow");
+        match ask(hint, &val_str(cur)).as_str() {
+            "" if cur.is_some() => p.social.remove(site),
+            "" => None, // keep a hand-typed number, if any
             v => p.social.insert(site.to_string(), Value::String(v.to_string())),
         };
     }
 
     eprintln!();
-    eprintln!("  Sites that need a login to read. Type your follower count; update it any time:");
-    let mut manual: Vec<String> = ["x", "instagram", "linkedin", "reddit", "quora"].map(String::from).to_vec();
+    eprintln!("  Sites humblebrag can't read. Type your follower count; update it any time:");
+    let mut manual: Vec<String> = vec!["quora".to_string()];
     for k in p.social.keys() {
         if !crate::social::FETCHED.contains(&k.as_str()) && !manual.contains(k) {
             manual.push(k.clone());

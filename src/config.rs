@@ -10,7 +10,7 @@
 //!       "npm": ["~ahmadawais", "command-code"],
 //!       "github": ["ahmadawais", "CommandCodeAI"],
 //!       "contributions": true,
-//!       "social": { "youtube": "@AhmadAwais", "bluesky": "ahmadawais.com", "x": 105000 }
+//!       "social": { "x": "MrAhmadAwais", "youtube": "@AhmadAwais", "quora": 1200 }
 //!     }
 //!   }
 //! }

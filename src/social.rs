@@ -23,6 +23,24 @@ impl Stat {
 
 const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36";
 
+// Instagram, LinkedIn and Reddit serve public counts to link-preview bots.
+const PREVIEW_UA: &str = "facebookexternalhit/1.1";
+
+async fn get_ua(client: &reqwest::Client, url: &str, ua: &str) -> Result<String, String> {
+    let r = client.get(url).header("accept-language", "en-US,en").header("user-agent", ua).send().await.map_err(|e| e.to_string())?;
+    if !r.status().is_success() {
+        return Err(format!("HTTP {}", r.status().as_u16()));
+    }
+    r.text().await.map_err(|e| e.to_string())
+}
+
+/// The number right after `key` in `text`, e.g. key `"followers_count":`.
+fn num_after(text: &str, key: &str) -> Option<u64> {
+    let rest = &text[text.find(key)? + key.len()..];
+    let digits: String = rest.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
 async fn get_text(client: &reqwest::Client, url: &str, browser: bool) -> Result<String, String> {
     let mut req = client.get(url).header("accept-language", "en-US,en");
     if browser {
@@ -82,6 +100,45 @@ async fn fetch_one(client: &reqwest::Client, site: &str, v: &Value) -> Result<St
             let d = get_json(client, &format!("https://api.stackexchange.com/2.3/users/{id}?site=stackoverflow")).await?;
             stat(d["items"][0]["reputation"].as_u64().ok_or("user not found")?, "reputation", "")
         }
+        "x" | "twitter" => {
+            let h = id.trim_start_matches('@');
+            // Twitter's own embed timeline carries the count; fxtwitter is the fallback.
+            let html = get_ua(client, &format!("https://syndication.twitter.com/srv/timeline-profile/screen-name/{h}"), UA).await.unwrap_or_default();
+            if let Some(n) = num_after(&html, "\"followers_count\":") {
+                return stat(n, "followers", "");
+            }
+            let d = get_json(client, &format!("https://api.fxtwitter.com/{h}")).await?;
+            stat(d["user"]["followers"].as_u64().ok_or("account not found")?, "followers", "")
+        }
+        "instagram" => {
+            let h = id.trim_start_matches('@');
+            let html = get_ua(client, &format!("https://www.instagram.com/{h}/"), PREVIEW_UA).await?;
+            // <meta content="6,733 Followers, 1,132 Following, 432 Posts - ...">
+            let n = html
+                .split("content=\"")
+                .find_map(|s| s.split_once(" Followers").and_then(|(n, _)| parse_count(n)))
+                .ok_or("follower count not found on the page")?;
+            stat(n, "followers", "")
+        }
+        "linkedin" => {
+            let h = id.trim_start_matches("https://www.linkedin.com/in/").trim_matches('/');
+            let html = get_ua(client, &format!("https://www.linkedin.com/in/{h}/"), PREVIEW_UA).await?;
+            // The profile's JSON-LD: {"interactionType":"https://schema.org/FollowAction",...,"userInteractionCount":N}
+            let at = html.find("schema.org/FollowAction").ok_or("follower count not found on the page")?;
+            let n = num_after(&html[at..], "\"userInteractionCount\":").ok_or("follower count not found on the page")?;
+            stat(n, "followers", "")
+        }
+        "reddit" => {
+            let h = id.trim_start_matches("u/").trim_start_matches("/u/");
+            let text = get_ua(client, &format!("https://api.reddit.com/user/{h}/about"), PREVIEW_UA).await?;
+            let d: Value = serde_json::from_str(&text).map_err(|_| "Reddit blocked the request")?;
+            let karma = d["data"]["total_karma"].as_u64().ok_or("user not found")?;
+            let followers = d["data"]["subreddit"]["subscribers"].as_u64().unwrap_or(0);
+            if followers == 0 {
+                return stat(karma, "karma", "");
+            }
+            stat(followers, "followers", "")
+        }
         "hackernews" => {
             let d = get_json(client, &format!("https://hacker-news.firebaseio.com/v0/user/{id}.json")).await?;
             stat(d["karma"].as_u64().ok_or("user not found")?, "karma", "")
@@ -90,12 +147,13 @@ async fn fetch_one(client: &reqwest::Client, site: &str, v: &Value) -> Result<St
     }
 }
 
-pub const FETCHED: [&str; 5] = ["youtube", "bluesky", "mastodon", "stackoverflow", "hackernews"];
+pub const FETCHED: [&str; 10] = ["x", "twitter", "instagram", "linkedin", "reddit", "youtube", "bluesky", "mastodon", "stackoverflow", "hackernews"];
 
-/// Sites in FETCHED take a handle or id. Any other site takes a number you keep up to date.
+/// Sites in FETCHED take a handle or id. A plain number is a count you keep up
+/// to date by hand (any site; Stack Overflow's number is its user id).
 pub async fn fetch(client: &reqwest::Client, social: &BTreeMap<String, Value>) -> Vec<Result<Stat, String>> {
     join_all(social.iter().map(|(site, v)| async move {
-        if FETCHED.contains(&site.as_str()) {
+        if FETCHED.contains(&site.as_str()) && (v.is_string() || site == "stackoverflow") {
             fetch_one(client, site, v).await.map_err(|e| format!("{site}: {e}"))
         } else {
             match v.as_u64() {

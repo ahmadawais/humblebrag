@@ -82,8 +82,10 @@ A profile groups everything that counts as your work under one name. Run `hb onb
 - npm users and packages
 - GitHub users, orgs, and repos
 - whether to track your merged PRs to other people's repos
-- your handles on sites humblebrag can read: YouTube, Bluesky, Mastodon, Stack Overflow, Hacker News
-- your follower counts on sites that need a login to read, such as X, Instagram, LinkedIn, Reddit, and Quora. You type these in and update them by running `hb onboard` again.
+- your handles on X, Instagram, LinkedIn, Reddit, YouTube, Bluesky, Mastodon, Stack Overflow, and Hacker News. humblebrag reads their public follower counts, karma, or reputation without logging in.
+- your follower counts on sites it can't read, such as Quora. You type these in and update them by running `hb onboard` again.
+
+X counts come from X's embed timeline, with [FxTwitter](https://github.com/FxEmbed/FxEmbed) as a fallback. Instagram, LinkedIn, and Reddit counts come from the pages these sites serve to link previews. Any of these can stop working when a site changes its pages. When one fails, humblebrag says so and the rest of the run continues.
 
 Then `hb <profile>` shows all of it with one total audience. Each run also writes one line per day to `history-<profile>.jsonl` and prints what changed since the last day you ran it. A year of daily runs is about 100 KB.
 
@@ -96,7 +98,7 @@ The config lives at `~/.config/humblebrag/config.json`. If you tell `hb onboard`
       "npm": ["~ahmadawais"],
       "github": ["ahmadawais", "CommandCodeAI"],
       "contributions": true,
-      "social": { "youtube": "@AhmadAwais", "bluesky": "ahmadawais.com", "stackoverflow": "950111", "x": 100000 }
+      "social": { "x": "MrAhmadAwais", "linkedin": "mrahmadawais", "youtube": "@AhmadAwais", "stackoverflow": "950111", "quora": 1200 }
     }
   }
 }

@@ -3,9 +3,9 @@
 Blazing-fast npm download stats for a user or a set of packages. Single Rust binary, terminal summary, JSON export, and a self-contained interactive HTML report.
 
 ```sh
-cargo build --release
-./target/release/npmstat user ahmadawais --html report.html --json report.json
-./target/release/npmstat pkg react,vue,svelte --from 2024-01-01
+./scripts/install.sh            # release build → ~/.local/bin/npmstat
+npmstat user ahmadawais --html report.html --json report.json
+npmstat pkg react,vue,svelte --from 2024-01-01
 ```
 
 ## Why it's faster than npm-stat.com

@@ -16,7 +16,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+mod config;
 mod github;
+mod onboard;
+mod social;
 
 // CI sets HUMBLEBRAG_VERSION to the release version; local builds use Cargo.toml.
 const VERSION: &str = match option_env!("HUMBLEBRAG_VERSION") {
@@ -572,13 +575,24 @@ USAGE:
   hb <name> [options]              npm + GitHub for a user or package
   hb npm <name>... [options]       npm downloads only
   hb gh <login|owner/repo>...      GitHub only: stars, forks, watchers, followers
+  hb contrib <login>               merged PRs to repos you don't own, kept in a record
+  hb onboard                       set up a profile (npm, GitHub, social sites)
 
   <name> for npm is a package or user, auto-detected. ~<user> forces a user,
   several names are combined. `hb user <name>` and `hb pkg <name>` still work.
   For a package, the GitHub part uses its repository from package.json.
 
+PROFILES:
+  `hb onboard` saves a profile to ~/.config/humblebrag/config.json (or a path you
+  pick, linked from there; $HUMBLEBRAG_CONFIG overrides). `hb <profile>` then
+  totals its npm users and packages, GitHub accounts, merged PRs, and social
+  followers, and adds a line per day to history-<profile>.jsonl next to the config.
+
 OPTIONS:
   --gh <login|owner/repo>  GitHub target for `hb <name>` when it differs
+  --no-profile        ignore a profile with this name
+  --all               list every package, repo and contribution
+  --no-record         `hb contrib`: don't update the record file
   --from YYYY-MM-DD   start date (default 2015-01-10, first day npm has data)
   --to   YYYY-MM-DD   end date   (default: latest day npm has data)
   --json <file>       write full JSON (npm daily totals, per package, GitHub)
@@ -606,6 +620,7 @@ enum Mode {
     Both,
     Npm,
     Gh,
+    Contrib,
 }
 
 struct NpmOpts {
@@ -629,12 +644,17 @@ async fn main() {
         println!("humblebrag {VERSION}");
         return;
     }
+    if args[0] == "onboard" {
+        onboard::run();
+        return;
+    }
     // Optional mode word, then names (anything before the first flag).
     let mut i = 0;
     let mut mode = Mode::Both;
     match args[0].as_str() {
         "npm" => (mode, i) = (Mode::Npm, 1),
         "gh" | "github" => (mode, i) = (Mode::Gh, 1),
+        "contrib" | "contributions" => (mode, i) = (Mode::Contrib, 1),
         "user" | "pkg" => mode = Mode::Npm,
         _ => {}
     }
@@ -664,6 +684,7 @@ async fn main() {
     let (mut json_out, mut html_out) = (None::<String>, None::<String>);
     let (mut rate, mut burst) = (DEFAULT_RATE, DEFAULT_BURST);
     let mut gh_override: Option<String> = None;
+    let (mut no_profile, mut no_record) = (false, false);
     while i < args.len() {
         let val = || args.get(i + 1).cloned().unwrap_or_else(|| usage());
         match args[i].as_str() {
@@ -680,6 +701,18 @@ async fn main() {
             "--ttl" => o.ttl = val().parse::<u64>().unwrap_or_else(|_| usage()) * 60,
             "--rate" => rate = val().parse().unwrap_or_else(|_| usage()),
             "--burst" => burst = val().parse().unwrap_or_else(|_| usage()),
+            "--all" => {
+                o.top = usize::MAX;
+                i -= 1;
+            }
+            "--no-profile" => {
+                no_profile = true;
+                i -= 1;
+            }
+            "--no-record" => {
+                no_record = true;
+                i -= 1;
+            }
             "--exact" => {
                 o.exact = true;
                 i -= 1;
@@ -700,7 +733,7 @@ async fn main() {
         eprintln!("--from is after --to");
         std::process::exit(2);
     }
-    if mode == Mode::Gh && html_out.is_some() {
+    if matches!(mode, Mode::Gh | Mode::Contrib) && html_out.is_some() {
         eprintln!("--html needs npm data; use `hb <name>` or `hb npm <name>`");
         std::process::exit(2);
     }
@@ -716,10 +749,36 @@ async fn main() {
         .build()
         .unwrap();
     let token = if mode == Mode::Npm { None } else { github::token() };
+    let cfg = config::load();
+    let profile = (!no_profile && names.len() == 1 && explicit.is_none() && gh_override.is_none())
+        .then(|| cfg.profile(&names[0]))
+        .flatten();
+    if let Some((name, _)) = &profile {
+        eprintln!("  profile {name} ({})", config::path().display());
+    }
+
+    // Contributions only.
+    if mode == Mode::Contrib {
+        let login = names[0].trim_start_matches('@').to_string();
+        let exclude: Vec<String> = match &profile {
+            Some((_, p)) if !p.github.is_empty() => p.github.clone(),
+            _ => vec![login.clone()],
+        };
+        let prs = contrib_report(&client, &token, &login, &exclude, &cfg, no_record, o.top).await;
+        if let Some(f) = json_out {
+            std::fs::write(&f, serde_json::to_vec(&serde_json::json!({ "contributions": prs })).unwrap()).expect("write json");
+            eprintln!("  → {f}");
+        }
+        return;
+    }
 
     // GitHub only.
     if mode == Mode::Gh {
-        let owners = gh_report(&client, &names, &token, o.top).await;
+        let targets = match &profile {
+            Some((_, p)) if !p.github.is_empty() => p.github.clone(),
+            _ => names.clone(),
+        };
+        let owners = gh_report(&client, &targets, &token, o.top).await;
         if owners.is_empty() {
             std::process::exit(1);
         }
@@ -737,7 +796,14 @@ async fn main() {
         }
         last_available(&client, o.ttl.min(3600)).await
     };
-    let (last_day, resolved) = tokio::join!(last_day, resolve(&client, explicit, names.clone()));
+    let resolving = async {
+        match &profile {
+            Some((name, p)) if p.npm.is_empty() => Err(format!("profile {name} has no npm entries")),
+            Some((name, p)) => resolve_many(&client, &p.npm).await.map(|pk| ("profile".to_string(), name.clone(), pk)),
+            None => resolve(&client, explicit, names.clone()).await,
+        }
+    };
+    let (last_day, resolved) = tokio::join!(last_day, resolving);
     if let Some(d) = last_day {
         o.to = d;
     }
@@ -754,6 +820,7 @@ async fn main() {
     };
     let gh_targets: Vec<String> = match (mode, &gh_override, &npm) {
         (Mode::Npm, _, _) => vec![],
+        _ if profile.is_some() => profile.as_ref().unwrap().1.github.clone(),
         (_, Some(g), _) => vec![g.clone()],
         (_, None, Some((m, target, _))) if m == "user" => vec![target.clone()],
         (_, None, Some((_, target, pkgs))) => {
@@ -765,9 +832,24 @@ async fn main() {
         }
         (_, None, None) => names.clone(),
     };
+    let contrib_task = match &profile {
+        Some((name, p)) if p.contributions && mode == Mode::Both && !p.github.is_empty() => {
+            let (client, token, login, exclude) = (client.clone(), token.clone(), p.github[0].clone(), p.github.clone());
+            let _ = name;
+            Some(tokio::spawn(async move { github::contributions(&client, &token, &login, &exclude).await.map(|v| (login, v)) }))
+        }
+        _ => None,
+    };
     let gh_task = {
         let (client, token) = (client.clone(), token.clone());
         tokio::spawn(async move { github::fetch(&client, &gh_targets, &token).await })
+    };
+    let social_task = match &profile {
+        Some((_, p)) if mode == Mode::Both && !p.social.is_empty() => {
+            let (client, social) = (client.clone(), p.social.clone());
+            Some(tokio::spawn(async move { social::fetch(&client, &social).await }))
+        }
+        _ => None,
     };
 
     let npm_data = match npm {
@@ -783,14 +865,71 @@ async fn main() {
         }
     }
     github::print(&owners, o.top, token.is_some());
+    let mut contribs = None;
+    if let Some(t) = contrib_task {
+        match t.await {
+            Ok(Ok((login, fresh))) => contribs = Some(finish_contrib(&cfg, &login, fresh, no_record, o.top.min(10))),
+            Ok(Err(e)) => eprintln!("  contributions: {e}"),
+            Err(_) => {}
+        }
+    }
+    let mut stats = vec![];
+    if let Some(t) = social_task {
+        for r in t.await.unwrap_or_default() {
+            match r {
+                Ok(x) => stats.push(x),
+                Err(e) => eprintln!("  social: {e}"),
+            }
+        }
+    }
+    let gh_followers: Option<u64> = owners.iter().filter_map(|o| o.followers).reduce(|a, b| a + b);
+    if let Some((name, _)) = &profile {
+        social::print(name, &stats, gh_followers);
+    }
     if npm_data.is_none() && owners.is_empty() {
         std::process::exit(1);
+    }
+
+    // One history line per profile per day, and what changed since the last one.
+    if let (Some((name, _)), Mode::Both) = (&profile, mode) {
+        let mut m = serde_json::Map::new();
+        if let Some(d) = &npm_data {
+            m.insert("npm_downloads".into(), d["total"].clone());
+            m.insert("npm_packages".into(), serde_json::json!(d["packages"].as_array().map_or(0, |a| a.len())));
+        }
+        if !owners.is_empty() {
+            let g = github::to_json(&owners);
+            for k in ["stars", "forks", "watchers", "followers"] {
+                if !g[k].is_null() {
+                    m.insert(format!("gh_{k}"), g[k].clone());
+                }
+            }
+        }
+        if let Some(c) = &contribs {
+            m.insert("merged_prs".into(), serde_json::json!(c.len()));
+        }
+        for st in &stats {
+            m.insert(st.site.clone(), serde_json::json!(st.value));
+        }
+        if !stats.is_empty() || gh_followers.is_some() {
+            let aud: u64 = stats.iter().filter(|s| s.is_audience()).map(|s| s.value).sum::<u64>() + gh_followers.unwrap_or(0);
+            m.insert("audience".into(), serde_json::json!(aud));
+        }
+        let path = cfg.record_dir().join(format!("history-{}.jsonl", name.to_lowercase()));
+        match social::record_history(&path, &m) {
+            Ok(Some(prev)) => social::print_deltas(&prev, &m),
+            Ok(None) => eprintln!("  history {} (changes show from the next day)", config::tilde(&path)),
+            Err(e) => eprintln!("  history: {e}"),
+        }
     }
 
     if json_out.is_some() || html_out.is_some() {
         let mut data = npm_data.unwrap_or_else(|| serde_json::json!({}));
         if !owners.is_empty() {
             data["github"] = github::to_json(&owners);
+        }
+        if let Some(c) = &contribs {
+            data["contributions"] = serde_json::to_value(c).unwrap();
         }
         if let Some(f) = json_out {
             std::fs::write(&f, serde_json::to_vec(&data).unwrap()).expect("write json");
@@ -806,6 +945,61 @@ async fn main() {
             }
         }
     }
+}
+
+/// npm packages for a profile: `~user` entries expand to that user's packages.
+async fn resolve_many(client: &reqwest::Client, entries: &[String]) -> Result<Vec<String>, String> {
+    let lists = futures::future::join_all(entries.iter().map(|e| async move {
+        match e.strip_prefix('~') {
+            Some(u) => user_packages(client, u).await,
+            None => Ok(vec![e.clone()]),
+        }
+    }))
+    .await;
+    let mut all = BTreeSet::new();
+    for l in lists {
+        all.extend(l?);
+    }
+    Ok(all.into_iter().collect())
+}
+
+async fn contrib_report(
+    client: &reqwest::Client,
+    token: &Option<String>,
+    login: &str,
+    exclude: &[String],
+    cfg: &config::Config,
+    no_record: bool,
+    top: usize,
+) -> Vec<github::Pr> {
+    match github::contributions(client, token, login, exclude).await {
+        Ok(fresh) => finish_contrib(cfg, login, fresh, no_record, top),
+        Err(e) => {
+            eprintln!("  contributions: {e}");
+            std::process::exit(1)
+        }
+    }
+}
+
+/// Merge into the record file (unless --no-record) and print.
+fn finish_contrib(cfg: &config::Config, login: &str, fresh: Vec<github::Pr>, no_record: bool, top: usize) -> Vec<github::Pr> {
+    let prs = if no_record {
+        fresh
+    } else {
+        let path = cfg.record_dir().join(format!("contributions-{}.json", login.to_lowercase()));
+        match github::merge_record(&path, login, fresh.clone()) {
+            Ok((all, added)) => {
+                eprintln!("  record {} ({} PRs, {added} new)", path.display(), all.len());
+                all
+            }
+            Err(e) => {
+                eprintln!("  record: {e}");
+                fresh
+            }
+        }
+    };
+    github::print_contributions(login, &prs, top);
+    prs
 }
 
 async fn gh_report(client: &reqwest::Client, targets: &[String], token: &Option<String>, top: usize) -> Vec<github::Owner> {

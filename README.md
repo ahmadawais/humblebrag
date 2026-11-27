@@ -57,6 +57,8 @@ hb npm <name>                      # npm downloads only
 hb gh <login>                      # GitHub only: a user or an org
 hb gh <owner/repo>                 # GitHub only: one repo
 hb gh vuejs vitejs                 # several GitHub targets, added together
+hb contrib <login>                 # merged PRs to repos you don't own
+hb onboard                         # set up a profile
 hb npm react vue svelte            # several packages, added together
 hb npm ~<user>                     # an npm user, when the name is also a package
 hb ahmadawais --gh AhmadAwais      # GitHub login differs from the npm name
@@ -73,10 +75,44 @@ The `--html` file is one self-contained page. It has monthly, yearly, and cumula
 
 When a name is both a package and a user, humblebrag picks the package and prints the command for the user.
 
+## Profiles
+
+A profile groups everything that counts as your work under one name. Run `hb onboard` to make one. It asks for:
+
+- npm users and packages
+- GitHub users, orgs, and repos
+- whether to track your merged PRs to other people's repos
+- your handles on sites humblebrag can read: YouTube, Bluesky, Mastodon, Stack Overflow, Hacker News
+- your follower counts on sites that need a login to read, such as X, Instagram, LinkedIn, Reddit, and Quora. You type these in and update them by running `hb onboard` again.
+
+Then `hb <profile>` shows all of it with one total audience. Each run also writes one line per day to `history-<profile>.jsonl` and prints what changed since the last day you ran it. A year of daily runs is about 100 KB.
+
+The config lives at `~/.config/humblebrag/config.json`. If you tell `hb onboard` to save it somewhere else, such as a dotfiles repo, it links the default path to that file. The history and contribution records go in the same folder as the config. `HUMBLEBRAG_CONFIG` overrides the path.
+
+```json
+{
+  "profiles": {
+    "ahmadawais": {
+      "npm": ["~ahmadawais"],
+      "github": ["ahmadawais", "CommandCodeAI"],
+      "contributions": true,
+      "social": { "youtube": "@AhmadAwais", "bluesky": "ahmadawais.com", "stackoverflow": "950111", "x": 100000 }
+    }
+  }
+}
+```
+
+## Contributions
+
+`hb contrib <login>` lists merged pull requests to public repos you don't own, sorted by the repo's stars. With a profile, repos owned by any of its GitHub accounts are left out too. Every run merges the results into `contributions-<login>.json`, so a PR stays in the record even if GitHub stops returning it. This needs a GitHub token. GitHub search returns at most 1,000 results per query, so humblebrag searches one year at a time.
+
 ## Options
 
 ```
 --gh <target>       GitHub login or owner/repo, when it differs from the npm name
+--no-profile        ignore a profile with the same name
+--all               list every package, repo and contribution
+--no-record         hb contrib: don't update the record file
 --from YYYY-MM-DD   start date (default 2015-01-10, the first day npm has data)
 --to   YYYY-MM-DD   end date (default: the last day npm has data)
 --json <file>       write npm daily and per-package monthly totals, and GitHub counts, as JSON

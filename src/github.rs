@@ -5,6 +5,7 @@
 //! REST API (60 requests/hour), which has no cheap watcher count for owners.
 
 use futures::future::join_all;
+use futures::StreamExt;
 use serde_json::{json, Value};
 
 const REST: &str = "https://api.github.com";
@@ -280,4 +281,151 @@ pub fn to_json(owners: &[Owner]) -> Value {
             "repos": o.repos.iter().map(|r| json!({"name": r.name, "stars": r.stars, "forks": r.forks, "watchers": r.watchers})).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
     })
+}
+
+// ---------- contributions: merged PRs to repos you don't own ----------
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct Pr {
+    pub url: String,
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    pub merged_at: String,
+    pub stars: u64,
+}
+
+const SEARCH_Q: &str = "query($q:String!,$after:String){search(query:$q,type:ISSUE,first:100,after:$after){
+ issueCount pageInfo{hasNextPage endCursor}
+ nodes{... on PullRequest{url number title mergedAt repository{nameWithOwner stargazerCount isPrivate}}}}}";
+
+/// Merged PRs by `login` to public repos not owned by anyone in `exclude`.
+/// Search returns at most 1,000 results per query, so it asks one year at a time.
+pub async fn contributions(client: &reqwest::Client, token: &Option<String>, login: &str, exclude: &[String]) -> Result<Vec<Pr>, String> {
+    if token.is_none() {
+        return Err("contributions need a GitHub token: set GITHUB_TOKEN or run `gh auth login`".into());
+    }
+    let mut base = format!("author:{login} is:pr is:merged");
+    for e in exclude {
+        let owner = e.split('/').next().unwrap_or(e);
+        base.push_str(&format!(" -user:{owner}"));
+    }
+    let this_year: i32 = chrono::Datelike::year(&chrono::Utc::now());
+    // Start at the account's first year; GitHub launched in 2008.
+    let d = graphql(client, token, "query($l:String!){user(login:$l){createdAt}}", json!({ "l": login })).await?;
+    let first: i32 = d["user"]["createdAt"].as_str().and_then(|c| c.get(..4)).and_then(|y| y.parse().ok()).unwrap_or(2008);
+    let years: Vec<i32> = (first.max(2008)..=this_year).rev().collect();
+    let pages = futures::stream::iter(years)
+        .map(|y| {
+            let q = format!("{base} merged:{y}-01-01..{y}-12-31");
+            async move {
+                let mut out = vec![];
+                let mut after = Value::Null;
+                loop {
+                    let d = graphql(client, token, SEARCH_Q, json!({ "q": q, "after": after })).await?;
+                    let s = &d["search"];
+                    for n in s["nodes"].as_array().into_iter().flatten() {
+                        if n["repository"]["isPrivate"] == true || n["url"].is_null() {
+                            continue;
+                        }
+                        out.push(Pr {
+                            url: n["url"].as_str().unwrap_or("").to_string(),
+                            repo: n["repository"]["nameWithOwner"].as_str().unwrap_or("").to_string(),
+                            number: num(&n["number"]),
+                            title: n["title"].as_str().unwrap_or("").to_string(),
+                            merged_at: n["mergedAt"].as_str().unwrap_or("").to_string(),
+                            stars: num(&n["repository"]["stargazerCount"]),
+                        });
+                    }
+                    if s["pageInfo"]["hasNextPage"] != true {
+                        break;
+                    }
+                    after = s["pageInfo"]["endCursor"].clone();
+                }
+                Ok::<_, String>(out)
+            }
+        })
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+    let mut prs = vec![];
+    for p in pages {
+        prs.extend(p?);
+    }
+    Ok(prs)
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Record {
+    login: String,
+    updated: String,
+    prs: Vec<Pr>,
+}
+
+/// Merge fresh results into the record file: new PRs are added, known ones get
+/// fresh star counts, and PRs GitHub no longer returns are kept.
+/// Returns the merged list and how many PRs were new.
+pub fn merge_record(path: &std::path::Path, login: &str, fresh: Vec<Pr>) -> Result<(Vec<Pr>, usize), String> {
+    let mut all: std::collections::BTreeMap<String, Pr> = std::collections::BTreeMap::new();
+    if let Ok(text) = std::fs::read_to_string(path) {
+        let r: Record = serde_json::from_str(&text).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+        for p in r.prs {
+            all.insert(p.url.clone(), p);
+        }
+    }
+    let before = all.len();
+    for p in fresh {
+        all.insert(p.url.clone(), p);
+    }
+    let added = all.len() - before;
+    let mut prs: Vec<Pr> = all.into_values().collect();
+    prs.sort_by(|a, b| b.merged_at.cmp(&a.merged_at));
+    let rec = Record { login: login.to_string(), updated: chrono::Utc::now().to_rfc3339(), prs };
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(&rec).unwrap() + "\n").map_err(|e| e.to_string())?;
+    Ok((rec.prs, added))
+}
+
+pub fn print_contributions(login: &str, prs: &[Pr], top: usize) {
+    use std::collections::{BTreeSet, HashMap};
+    struct R {
+        prs: usize,
+        stars: u64,
+        first: String,
+        last: String,
+    }
+    let mut by: HashMap<&str, R> = HashMap::new();
+    for p in prs {
+        let r = by.entry(&p.repo).or_insert(R { prs: 0, stars: 0, first: p.merged_at.clone(), last: p.merged_at.clone() });
+        r.prs += 1;
+        r.stars = r.stars.max(p.stars);
+        r.first = r.first.clone().min(p.merged_at.clone());
+        r.last = r.last.clone().max(p.merged_at.clone());
+    }
+    let orgs: BTreeSet<&str> = by.keys().map(|r| r.split('/').next().unwrap_or(r)).collect();
+    let mut rows: Vec<(&str, R)> = by.into_iter().collect();
+    rows.sort_by(|a, b| b.1.stars.cmp(&a.1.stars).then(b.1.prs.cmp(&a.1.prs)).then(a.0.cmp(b.0)));
+
+    println!();
+    println!("  contributions · {login} · merged PRs to repos you don't own");
+    println!("  ─────────────────────────────────────────────");
+    println!("  merged PRs      {:>16}", fmt(prs.len() as u64));
+    println!("  repos           {:>16}", fmt(rows.len() as u64));
+    println!("  orgs and users  {:>16}", fmt(orgs.len() as u64));
+    if rows.is_empty() {
+        println!();
+        return;
+    }
+    let w = rows.iter().take(top).map(|r| r.0.chars().count()).max().unwrap_or(4).max(4);
+    println!();
+    println!("  {} repos by stars", if top >= rows.len() { "all".to_string() } else { format!("top {top}") });
+    println!("  {:<w$}  {:>9}  {:>4}  {:>9}", "", "stars", "PRs", "years");
+    for (name, r) in rows.iter().take(top) {
+        let (a, b) = (&r.first[..4.min(r.first.len())], &r.last[..4.min(r.last.len())]);
+        let years = if a == b { a.to_string() } else { format!("{a}-{b}") };
+        println!("  {name:<w$}  {:>9}  {:>4}  {:>9}", fmt(r.stars), r.prs, years);
+    }
+    println!();
 }

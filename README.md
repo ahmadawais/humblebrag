@@ -85,7 +85,9 @@ A profile groups everything that counts as your work under one name. Run `hb onb
 - your handles on X, Instagram, LinkedIn, Reddit, YouTube, Bluesky, Mastodon, Stack Overflow, and Hacker News. humblebrag reads their public follower counts, karma, or reputation without logging in.
 - your follower counts on sites it can't read, such as Quora. You type these in and update them by running `hb onboard` again.
 
-X counts come from X's embed timeline, with [FxTwitter](https://github.com/FxEmbed/FxEmbed) as a fallback. Instagram, LinkedIn, and Reddit counts come from the pages these sites serve to link previews. Any of these can stop working when a site changes its pages. When one fails, humblebrag says so and the rest of the run continues.
+X counts come from X's embed timeline, with [FxTwitter](https://github.com/FxEmbed/FxEmbed) as a fallback. Instagram, LinkedIn, and Reddit counts come from the pages these sites serve to link previews. YouTube also gives total channel views, and Stack Overflow gives people reached and answers. For several accounts on one site, use a list, such as `"youtube": ["@AhmadAwais", "@AhmadAwaisUrdu"]`. The accounts are shown one by one and added together in the history.
+
+Any of these can stop working when a site changes its pages. When one fails, humblebrag says so and uses the site's value from the last history line.
 
 Then `hb <profile>` shows all of it with one total audience. Each run also writes one line per day to `history-<profile>.jsonl` and prints what changed since the last day you ran it. A year of daily runs is about 100 KB.
 

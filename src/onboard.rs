@@ -37,6 +37,7 @@ fn ask_yes(q: &str, def: bool) -> bool {
 fn val_str(v: Option<&Value>) -> String {
     match v {
         Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(a)) => a.iter().map(|x| val_str(Some(x))).collect::<Vec<_>>().join(", "),
         Some(Value::Number(n)) => n.to_string(),
         _ => String::new(),
     }
@@ -75,12 +76,12 @@ pub fn run() {
     let def_gh = if p.github.is_empty() { vec![name.clone()] } else { p.github.clone() };
 
     eprintln!();
-    p.npm = ask_list("npm users (~name) and packages, comma separated", &def_npm);
+    p.npm = ask_list("npm users and packages, comma separated (~name forces a user)", &def_npm);
     p.github = ask_list("GitHub users, orgs, or owner/repo (first one is you)", &def_gh);
     p.contributions = ask_yes("Track your merged PRs to repos you don't own", p.contributions || p.github.len() > 0);
 
     eprintln!();
-    eprintln!("  Sites read automatically (leave empty to skip):");
+    eprintln!("  Sites read automatically (leave empty to skip; several accounts: a, b):");
     for (site, hint) in [
         ("x", "X handle"),
         ("instagram", "Instagram handle"),
@@ -93,11 +94,16 @@ pub fn run() {
         ("reddit", "Reddit username"),
     ] {
         // A number here was typed in by hand before; offer to switch to a handle.
-        let cur = p.social.get(site).filter(|v| v.is_string() || site == "stackoverflow");
+        let cur = p.social.get(site).filter(|v| v.is_string() || v.is_array() || site == "stackoverflow");
         match ask(hint, &val_str(cur)).as_str() {
             "" if cur.is_some() => p.social.remove(site),
             "" => None, // keep a hand-typed number, if any
-            v => p.social.insert(site.to_string(), Value::String(v.to_string())),
+            v => {
+                // Several accounts: "a, b" becomes a list.
+                let list: Vec<Value> = v.split([',', ' ']).filter(|x| !x.is_empty()).map(|x| Value::String(x.to_string())).collect();
+                let val = if list.len() == 1 { list.into_iter().next().unwrap() } else { Value::Array(list) };
+                p.social.insert(site.to_string(), val)
+            }
         };
     }
 

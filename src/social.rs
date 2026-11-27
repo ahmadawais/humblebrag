@@ -9,12 +9,27 @@ use std::path::Path;
 
 pub struct Stat {
     pub site: String,
+    /// "youtube", or "youtube @handle" when a site has several accounts.
+    pub label: String,
     pub value: u64,
-    pub unit: &'static str, // "followers" | "subscribers" | "reputation" | "karma"
+    pub unit: &'static str, // followers | subscribers | reputation | karma | views | reached | answers
     pub note: &'static str, // "" | "approx" | "manual"
 }
 
 impl Stat {
+    fn new(site: &str, value: u64, unit: &'static str, note: &'static str) -> Stat {
+        Stat { site: site.to_string(), label: site.to_string(), value, unit, note }
+    }
+
+    /// History key: the site for its main count, `site_unit` for extras like views.
+    pub fn key(&self) -> String {
+        if matches!(self.unit, "views" | "reached" | "answers") {
+            format!("{}_{}", self.site, self.unit)
+        } else {
+            self.site.clone()
+        }
+    }
+
     /// Counts people (followers, subscribers), as opposed to points.
     pub fn is_audience(&self) -> bool {
         matches!(self.unit, "followers" | "subscribers")
@@ -27,7 +42,13 @@ const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/53
 const PREVIEW_UA: &str = "facebookexternalhit/1.1";
 
 async fn get_ua(client: &reqwest::Client, url: &str, ua: &str) -> Result<String, String> {
-    let r = client.get(url).header("accept-language", "en-US,en").header("user-agent", ua).send().await.map_err(|e| e.to_string())?;
+    let send = || client.get(url).header("accept-language", "en-US,en").header("user-agent", ua).send();
+    let mut r = send().await.map_err(|e| e.to_string())?;
+    if r.status().as_u16() == 429 {
+        // Rate limited: wait once, then try again.
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        r = send().await.map_err(|e| e.to_string())?;
+    }
     if !r.status().is_success() {
         return Err(format!("HTTP {}", r.status().as_u16()));
     }
@@ -69,23 +90,47 @@ fn parse_count(s: &str) -> Option<u64> {
     num.parse::<f64>().ok().map(|n| (n * mul).round() as u64)
 }
 
+fn strip_tags(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() / 4);
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                out.push(' ');
+            }
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
 fn id_str(v: &Value) -> Option<String> {
     v.as_str().map(|s| s.to_string()).or_else(|| v.as_u64().map(|n| n.to_string()))
 }
 
-async fn fetch_one(client: &reqwest::Client, site: &str, v: &Value) -> Result<Stat, String> {
-    let stat = |value, unit, note| Ok(Stat { site: site.to_string(), value, unit, note });
+async fn fetch_one(client: &reqwest::Client, site: &str, v: &Value) -> Result<Vec<Stat>, String> {
+    let stat = |value, unit, note| Ok(vec![Stat::new(site, value, unit, note)]);
     let id = id_str(v).ok_or("expected a handle or id")?;
     match site {
         "youtube" => {
             let handle = if id.starts_with('@') || id.starts_with("channel/") { id } else { format!("@{id}") };
-            let html = get_text(client, &format!("https://www.youtube.com/{handle}"), true).await?;
-            // The page embeds e.g. "6.12K subscribers" (YouTube rounds it).
-            let n = html
-                .split('"')
-                .find_map(|s| s.strip_suffix(" subscribers").and_then(parse_count))
-                .ok_or("subscriber count not found on the page")?;
-            stat(n, "subscribers", "approx")
+            let html = get_text(client, &format!("https://www.youtube.com/{handle}/about"), true).await?;
+            // The channel's About panel: "subscriberCountText":"6.12K subscribers",
+            // "viewCountText":"607,616 views". YouTube rounds subscribers.
+            let about = html.find("\"aboutChannelViewModel\"").map(|i| &html[i..]).ok_or("channel not found")?;
+            let field = |k: &str| {
+                let key = format!("\"{k}\":\"");
+                let rest = &about[about.find(&key)? + key.len()..];
+                parse_count(rest[..rest.find('"')?].split(' ').next()?)
+            };
+            let mut out = vec![Stat::new(site, field("subscriberCountText").unwrap_or(0), "subscribers", "approx")];
+            if let Some(v) = field("viewCountText") {
+                out.push(Stat::new(site, v, "views", ""));
+            }
+            Ok(out)
         }
         "bluesky" => {
             let d = get_json(client, &format!("https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor={id}")).await?;
@@ -97,6 +142,25 @@ async fn fetch_one(client: &reqwest::Client, site: &str, v: &Value) -> Result<St
             stat(d["followers_count"].as_u64().ok_or("no followers_count")?, "followers", "")
         }
         "stackoverflow" => {
+            // The profile page has "15.1m reached" and answers, which the API doesn't.
+            // Its bot check lets HTTP/1.1 from a browser user agent through, not HTTP/2.
+            let h1 = reqwest::Client::builder().http1_only().timeout(std::time::Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
+            let page = get_text(&h1, &format!("https://stackoverflow.com/users/{id}"), true).await;
+            if let Ok(html) = page {
+                let text = strip_tags(&html);
+                let words: Vec<&str> = text.split_whitespace().collect();
+                let find = |label: &str| words.windows(2).find_map(|w| if w[1] == label { parse_count(w[0]) } else { None });
+                if let Some(rep) = find("reputation") {
+                    let mut out = vec![Stat::new(site, rep, "reputation", "")];
+                    if let Some(n) = find("reached") {
+                        out.push(Stat::new(site, n, "reached", "approx"));
+                    }
+                    if let Some(n) = find("answers") {
+                        out.push(Stat::new(site, n, "answers", ""));
+                    }
+                    return Ok(out);
+                }
+            }
             let d = get_json(client, &format!("https://api.stackexchange.com/2.3/users/{id}?site=stackoverflow")).await?;
             stat(d["items"][0]["reputation"].as_u64().ok_or("user not found")?, "reputation", "")
         }
@@ -151,18 +215,43 @@ pub const FETCHED: [&str; 10] = ["x", "twitter", "instagram", "linkedin", "reddi
 
 /// Sites in FETCHED take a handle or id. A plain number is a count you keep up
 /// to date by hand (any site; Stack Overflow's number is its user id).
+/// A site's value can also be a list, for several accounts on one site.
 pub async fn fetch(client: &reqwest::Client, social: &BTreeMap<String, Value>) -> Vec<Result<Stat, String>> {
-    join_all(social.iter().map(|(site, v)| async move {
+    let jobs: Vec<(String, Value, bool)> = social
+        .iter()
+        .flat_map(|(site, v)| {
+            let accts = v.as_array().cloned().unwrap_or_else(|| vec![v.clone()]);
+            let multi = accts.len() > 1;
+            accts.into_iter().map(move |a| (site.clone(), a, multi))
+        })
+        .collect();
+    let per = join_all(jobs.iter().map(|(site, v, multi)| async move {
+        let label = |st: &mut Stat| {
+            if *multi {
+                st.label = format!("{site} {}", id_str(v).unwrap_or_default());
+            }
+        };
         if FETCHED.contains(&site.as_str()) && (v.is_string() || site == "stackoverflow") {
-            fetch_one(client, site, v).await.map_err(|e| format!("{site}: {e}"))
+            match fetch_one(client, site, v).await {
+                Ok(mut list) => {
+                    list.iter_mut().for_each(label);
+                    list.into_iter().map(Ok).collect()
+                }
+                Err(e) => vec![Err(format!("{site} {}: {e}", id_str(v).unwrap_or_default()))],
+            }
         } else {
             match v.as_u64() {
-                Some(n) => Ok(Stat { site: site.clone(), value: n, unit: "followers", note: "manual" }),
-                None => Err(format!("{site}: can't fetch this site; set a number of followers instead")),
+                Some(n) => {
+                    let mut st = Stat::new(site, n, "followers", "manual");
+                    label(&mut st);
+                    vec![Ok(st)]
+                }
+                None => vec![Err(format!("{site}: can't fetch this site; set a number of followers instead"))],
             }
         }
     }))
-    .await
+    .await;
+    per.into_iter().flatten().collect()
 }
 
 pub fn print(name: &str, stats: &[Stat], gh_followers: Option<u64>) {
@@ -172,20 +261,47 @@ pub fn print(name: &str, stats: &[Stat], gh_followers: Option<u64>) {
     println!();
     println!("  social · {name}");
     println!("  ─────────────────────────────────────────────");
+    let w = stats.iter().map(|s| s.label.chars().count()).max().unwrap_or(0).max(15);
     for s in stats {
         let note = match s.note {
             "approx" => " (rounded by the site)",
             "manual" => " (from config)",
+            "last" => " (last known; this run failed)",
             _ => "",
         };
-        println!("  {:<15} {:>16}  {}{note}", s.site, crate::fmt(s.value), s.unit);
+        println!("  {:<w$} {:>16}  {}{note}", s.label, crate::fmt(s.value), s.unit);
     }
     let audience: u64 = stats.iter().filter(|s| s.is_audience()).map(|s| s.value).sum::<u64>() + gh_followers.unwrap_or(0);
-    println!("  {:<15} {:>16}  followers + subscribers{}", "AUDIENCE", crate::fmt(audience), if gh_followers.is_some() { ", GitHub included" } else { "" });
+    println!("  {:<w$} {:>16}  followers + subscribers{}", "AUDIENCE", crate::fmt(audience), if gh_followers.is_some() { ", GitHub included" } else { "" });
     println!();
 }
 
 // ---------- history ----------
+
+/// The newest line in the history file, if any.
+pub fn last_entry(path: &Path) -> Option<Map<String, Value>> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.lines().rev().find_map(|l| serde_json::from_str::<Value>(l).ok()?.as_object().cloned())
+}
+
+/// For sites that failed this run, use the value from the last history line.
+pub fn fill_from_history(stats: &mut Vec<Stat>, sites: &[String], last: &Map<String, Value>) {
+    for site in sites {
+        if stats.iter().any(|s| &s.site == site) {
+            continue;
+        }
+        if let Some(v) = last.get(site).and_then(|v| v.as_u64()) {
+            let unit = match site.as_str() {
+                "hackernews" | "reddit" => "karma",
+                "stackoverflow" => "reputation",
+                "youtube" => "subscribers",
+                _ => "followers",
+            };
+            stats.push(Stat::new(site, v, unit, "last"));
+        }
+    }
+    stats.sort_by(|a, b| a.site.cmp(&b.site));
+}
 
 /// Write today's numbers (replacing an earlier run today) and return the most
 /// recent earlier entry, for "since last time" deltas. One line per day.

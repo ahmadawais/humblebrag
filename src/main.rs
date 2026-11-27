@@ -883,6 +883,12 @@ async fn main() {
         }
     }
     let gh_followers: Option<u64> = owners.iter().filter_map(|o| o.followers).reduce(|a, b| a + b);
+    if let Some((name, p)) = &profile {
+        let path = cfg.record_dir().join(format!("history-{}.jsonl", name.to_lowercase()));
+        if let Some(last) = social::last_entry(&path) {
+            social::fill_from_history(&mut stats, &p.social.keys().cloned().collect::<Vec<_>>(), &last);
+        }
+    }
     if let Some((name, _)) = &profile {
         social::print(name, &stats, gh_followers);
     }
@@ -909,7 +915,10 @@ async fn main() {
             m.insert("merged_prs".into(), serde_json::json!(c.len()));
         }
         for st in &stats {
-            m.insert(st.site.clone(), serde_json::json!(st.value));
+            // Several accounts on one site add up under the site's key.
+            let k = st.key();
+            let sum = m.get(&k).and_then(|v| v.as_u64()).unwrap_or(0) + st.value;
+            m.insert(k, serde_json::json!(sum));
         }
         if !stats.is_empty() || gh_followers.is_some() {
             let aud: u64 = stats.iter().filter(|s| s.is_audience()).map(|s| s.value).sum::<u64>() + gh_followers.unwrap_or(0);
@@ -947,13 +956,11 @@ async fn main() {
     }
 }
 
-/// npm packages for a profile: `~user` entries expand to that user's packages.
+/// npm packages for a profile. Each entry is detected like `hb <name>`: `~user`
+/// is a user, `@scope/pkg` a package, and a bare name whichever exists.
 async fn resolve_many(client: &reqwest::Client, entries: &[String]) -> Result<Vec<String>, String> {
     let lists = futures::future::join_all(entries.iter().map(|e| async move {
-        match e.strip_prefix('~') {
-            Some(u) => user_packages(client, u).await,
-            None => Ok(vec![e.clone()]),
-        }
+        resolve(client, None, vec![e.clone()]).await.map(|(_, _, pkgs)| pkgs)
     }))
     .await;
     let mut all = BTreeSet::new();

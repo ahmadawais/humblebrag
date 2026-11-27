@@ -1,17 +1,43 @@
 name: release
 
-# Push a tag like v0.1.0 (matching Cargo.toml) to build 5 binaries and attach
-# them to a GitHub release. npm publishing happens locally: scripts/release.sh.
-# No npm token is stored in this repo.
+# Every push to main builds the 5 binaries and publishes them as a new GitHub
+# release. The version is Cargo.toml's major.minor plus the next free patch:
+# with Cargo.toml at 0.1.0 and v0.1.4 released, the next release is v0.1.5.
+# Raise major or minor in Cargo.toml to start a new line (0.2.0).
+# npm publishing is manual: `pnpm release` on your machine. No npm token here.
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+    paths-ignore: ['**.md', 'LICENSE', 'scripts/release.sh', '.github/workflows/ci.yml']
+  workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        run: |
+          base=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          mm=${base%.*}
+          last=$(git tag -l "v$mm.*" --sort=-v:refname | grep -E "^v$mm\.[0-9]+$" | head -1 || true)
+          if [ -z "$last" ]; then v=$base; else v="$mm.$(( ${last##*.} + 1 ))"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Releasing v$v"
+
   build:
+    needs: version
     strategy:
       fail-fast: true
       matrix:
@@ -22,13 +48,10 @@ jobs:
           - { key: linux-arm64, target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
           - { key: win32-x64, target: x86_64-pc-windows-msvc, os: windows-latest }
     runs-on: ${{ matrix.os }}
+    env:
+      HUMBLEBRAG_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - name: Tag matches Cargo.toml version
-        shell: bash
-        run: |
-          v=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
-          [ "v$v" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $v"; exit 1; }
       - run: rustup target add ${{ matrix.target }}
       - if: contains(matrix.target, 'musl')
         run: |
@@ -39,7 +62,8 @@ jobs:
         shell: bash
         run: |
           ext=""; [ "${{ matrix.key }}" = win32-x64 ] && ext=".exe"
-          ./target/${{ matrix.target }}/release/humblebrag$ext --version
+          got=$(./target/${{ matrix.target }}/release/humblebrag$ext --version | tr -d '\r')
+          [ "$got" = "humblebrag $HUMBLEBRAG_VERSION" ] || { echo "got '$got'"; exit 1; }
           mkdir out && cp target/${{ matrix.target }}/release/humblebrag$ext out/humblebrag-${{ matrix.key }}$ext
       - uses: actions/upload-artifact@v4
         with:
@@ -48,7 +72,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -60,4 +84,5 @@ jobs:
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" bins/* -R "$GITHUB_REPOSITORY" --generate-notes
+          TAG: v${{ needs.version.outputs.version }}
+        run: gh release create "$TAG" bins/* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --generate-notes

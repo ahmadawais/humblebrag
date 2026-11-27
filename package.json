@@ -1,0 +1,8 @@
+{
+	"name": "humblebrag-dev",
+	"private": true,
+	"description": "Dev scripts. The published npm package is built by scripts/npm-build.mjs.",
+	"scripts": {
+		"release": "bash scripts/release.sh"
+	}
+}

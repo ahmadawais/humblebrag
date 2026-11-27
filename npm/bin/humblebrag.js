@@ -1,32 +1,65 @@
 #!/usr/bin/env node
 'use strict';
-// Runs the prebuilt binary for this OS and CPU, shipped next to this file.
+// Runs the humblebrag binary for this OS and CPU. On first run it downloads the
+// binary from this version's GitHub release, checks it against the SHA-256 sum
+// shipped in this package, and caches it.
 const { spawnSync } = require('node:child_process');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
+const { version } = require('../package.json');
+const sums = require('./checksums.json');
+const REPO = 'ahmadawais/humblebrag';
+
 const key = `${process.platform}-${process.arch}`;
-const bin = path.join(__dirname, `humblebrag-${key}${process.platform === 'win32' ? '.exe' : ''}`);
-if (!fs.existsSync(bin)) {
-	console.error(
-		`humblebrag: no prebuilt binary for ${key}.\n` +
-			'Supported: darwin-arm64, darwin-x64, linux-x64, linux-arm64, win32-x64.\n' +
-			'Build from source: https://github.com/ahmadawais/humblebrag'
-	);
+const asset = `humblebrag-${key}${process.platform === 'win32' ? '.exe' : ''}`;
+const cacheRoot =
+	process.env.XDG_CACHE_HOME ||
+	(process.platform === 'win32' ? process.env.LOCALAPPDATA || os.tmpdir() : path.join(os.homedir(), '.cache'));
+const bin = path.join(cacheRoot, 'humblebrag', 'bin', version, asset);
+
+const fail = (msg) => {
+	console.error(`humblebrag: ${msg}`);
 	process.exit(1);
-}
-if (process.platform !== 'win32') {
-	try {
-		fs.accessSync(bin, fs.constants.X_OK);
-	} catch {
-		try {
-			fs.chmodSync(bin, 0o755);
-		} catch {}
+};
+
+async function download() {
+	const want = sums[asset];
+	if (!want) {
+		fail(
+			`no prebuilt binary for ${key}.\n` +
+				`Supported: ${Object.keys(sums).join(', ')}.\n` +
+				`Build from source: https://github.com/${REPO}`
+		);
 	}
+	const url = `https://github.com/${REPO}/releases/download/v${version}/${asset}`;
+	process.stderr.write(`humblebrag: downloading v${version} for ${key}... `);
+	let buf;
+	try {
+		const res = await fetch(url);
+		if (!res.ok) throw new Error(`HTTP ${res.status}`);
+		buf = Buffer.from(await res.arrayBuffer());
+	} catch (e) {
+		process.stderr.write('\n');
+		fail(`download failed (${e.message}): ${url}`);
+	}
+	const got = crypto.createHash('sha256').update(buf).digest('hex');
+	if (got !== want) {
+		process.stderr.write('\n');
+		fail(`checksum mismatch for ${asset}: expected ${want}, got ${got}. Not running it.`);
+	}
+	fs.mkdirSync(path.dirname(bin), { recursive: true });
+	const tmp = `${bin}.${process.pid}.tmp`;
+	fs.writeFileSync(tmp, buf, { mode: 0o755 });
+	fs.renameSync(tmp, bin);
+	process.stderr.write('done\n');
 }
-const r = spawnSync(bin, process.argv.slice(2), { stdio: 'inherit' });
-if (r.error) {
-	console.error(`humblebrag: ${r.error.message}`);
-	process.exit(1);
-}
-process.exit(r.status ?? 1);
+
+(async () => {
+	if (!fs.existsSync(bin)) await download();
+	const r = spawnSync(bin, process.argv.slice(2), { stdio: 'inherit' });
+	if (r.error) fail(r.error.message);
+	process.exit(r.status ?? 1);
+})();

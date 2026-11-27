@@ -1,37 +1,43 @@
 #!/usr/bin/env node
-// Builds the single `humblebrag` npm package: a Node launcher plus the
-// prebuilt binary for every platform in bin/.
-//   node scripts/npm-build.mjs --version 0.1.0 --bins <dir> --out <dir>
-// <dir> for --bins holds humblebrag-<platform>[.exe], e.g. humblebrag-darwin-arm64.
+// Builds the `humblebrag` npm package: a small Node launcher plus the SHA-256
+// sum of every platform binary. The binaries stay on the GitHub release; the
+// launcher downloads the right one on first run and checks it against the sum.
+//   node scripts/npm-build.mjs --version 0.1.0 --sums <SHA256SUMS> --out <dir>
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseArgs } from 'node:util';
 
 const { values: a } = parseArgs({
-	options: { version: { type: 'string' }, bins: { type: 'string' }, out: { type: 'string' } },
+	options: { version: { type: 'string' }, sums: { type: 'string' }, out: { type: 'string' } },
 });
-if (!a.version || !a.bins || !a.out) {
-	console.error('usage: npm-build.mjs --version <x.y.z> --bins <dir> --out <dir>');
+if (!a.version || !a.sums || !a.out) {
+	console.error('usage: npm-build.mjs --version <x.y.z> --sums <SHA256SUMS> --out <dir>');
 	process.exit(2);
 }
 const root = path.resolve(import.meta.dirname, '..');
 const platforms = JSON.parse(fs.readFileSync(path.join(root, 'npm/platforms.json'), 'utf8'));
-const pkg = path.join(a.out, 'humblebrag');
-const bin = path.join(pkg, 'bin');
-fs.rmSync(a.out, { recursive: true, force: true });
-fs.mkdirSync(bin, { recursive: true });
 
+// SHA256SUMS lines look like "<hex>  humblebrag-darwin-arm64".
+const all = Object.fromEntries(
+	fs
+		.readFileSync(a.sums, 'utf8')
+		.trim()
+		.split('\n')
+		.map((l) => l.trim().split(/\s+\*?/).reverse())
+);
+const sums = {};
 for (const [key, p] of Object.entries(platforms)) {
 	const file = `humblebrag-${key}${p.os === 'win32' ? '.exe' : ''}`;
-	const src = path.join(a.bins, file);
-	if (!fs.existsSync(src)) {
-		console.error(`missing ${src}`);
+	if (!/^[0-9a-f]{64}$/.test(all[file] || '')) {
+		console.error(`no checksum for ${file} in ${a.sums}`);
 		process.exit(1);
 	}
-	fs.copyFileSync(src, path.join(bin, file));
-	fs.chmodSync(path.join(bin, file), 0o755);
+	sums[file] = all[file];
 }
 
+const pkg = path.join(a.out, 'humblebrag');
+fs.rmSync(a.out, { recursive: true, force: true });
+fs.mkdirSync(path.join(pkg, 'bin'), { recursive: true });
 const manifest = {
 	name: 'humblebrag',
 	version: a.version,
@@ -43,12 +49,11 @@ const manifest = {
 	repository: { type: 'git', url: 'git+https://github.com/ahmadawais/humblebrag.git' },
 	bin: { humblebrag: 'bin/humblebrag.js' },
 	files: ['bin'],
-	os: [...new Set(Object.values(platforms).map((p) => p.os))],
-	cpu: [...new Set(Object.values(platforms).map((p) => p.cpu))],
-	engines: { node: '>=16' },
+	engines: { node: '>=18' },
 };
 fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify(manifest, null, '\t') + '\n');
-fs.copyFileSync(path.join(root, 'npm/bin/humblebrag.js'), path.join(bin, 'humblebrag.js'));
-fs.chmodSync(path.join(bin, 'humblebrag.js'), 0o755);
+fs.writeFileSync(path.join(pkg, 'bin/checksums.json'), JSON.stringify(sums, null, '\t') + '\n');
+fs.copyFileSync(path.join(root, 'npm/bin/humblebrag.js'), path.join(pkg, 'bin/humblebrag.js'));
+fs.chmodSync(path.join(pkg, 'bin/humblebrag.js'), 0o755);
 for (const f of ['README.md', 'LICENSE']) fs.copyFileSync(path.join(root, f), path.join(pkg, f));
-console.log(`built humblebrag@${a.version} with ${Object.keys(platforms).length} binaries in ${pkg}`);
+console.log(`built humblebrag@${a.version} (launcher + ${Object.keys(sums).length} checksums) in ${pkg}`);

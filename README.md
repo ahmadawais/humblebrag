@@ -95,7 +95,7 @@ A user with many scoped packages takes longer on the first run, because each sco
 
 ## How npx runs a native binary
 
-The `humblebrag` npm package holds a short Node script and five prebuilt binaries, one per platform. The script picks the one that matches your OS and CPU and runs it.
+The `humblebrag` npm package is a short Node script plus the SHA-256 sum of each prebuilt binary. On first run the script downloads the binary for your OS and CPU from the matching GitHub release, checks it against the sum, and caches it in `~/.cache/humblebrag/bin/`. Later runs start the cached binary directly. It needs Node 18 or newer.
 
 | Binary | Platform |
 |---|---|
@@ -118,15 +118,12 @@ cargo build --release
 
 ## Release
 
-Run `./scripts/release.sh 0.2.0` on `main`. It does the following:
+Every push to `main` builds the five binaries and publishes them as a GitHub release, with a `SHA256SUMS` file. The version is the major and minor from `Cargo.toml` plus the next free patch number. With `Cargo.toml` at 0.1.0 and v0.1.4 released, the next push makes v0.1.5. To start 0.2, set `Cargo.toml` to 0.2.0.
 
-1. Logs you in to npm in the browser if needed.
-2. Bumps `Cargo.toml`, commits, tags `v0.2.0`, and pushes.
-3. Waits for GitHub Actions to build the five binaries and attach them to a GitHub release.
-4. Downloads the binaries, checks their checksums, and packs them into the `humblebrag` npm package.
-5. Publishes it. npm asks you to approve once in the browser with a passkey or Touch ID.
+Publishing to npm is manual. Run `pnpm release` on your machine. It finds the GitHub releases newer than the version on npm and publishes each one. For each, it builds the package, installs it in a temp folder, runs it to test the download, then publishes. npm asks you to approve each publish in the browser with a passkey or Touch ID. No npm token is stored anywhere.
 
-No npm token is stored in GitHub, so publishing always needs you. Running the script again skips steps that are already done.
+- `pnpm release --latest` publishes only the newest release.
+- `pnpm release --dry-run` builds and tests without publishing.
 
 ## License
 

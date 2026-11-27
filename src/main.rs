@@ -16,6 +16,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+// CI sets HUMBLEBRAG_VERSION to the release version; local builds use Cargo.toml.
+const VERSION: &str = match option_env!("HUMBLEBRAG_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
 const API: &str = "https://api.npmjs.org/downloads/range";
 const REGISTRY: &str = "https://registry.npmjs.org";
 const BULK_MAX: usize = 128;
@@ -581,7 +586,7 @@ async fn main() {
         usage();
     }
     if matches!(args[0].as_str(), "-V" | "--version") {
-        println!("humblebrag {}", env!("CARGO_PKG_VERSION"));
+        println!("humblebrag {VERSION}");
         return;
     }
     // Optional explicit mode, then names (anything before the first flag).
@@ -645,7 +650,7 @@ async fn main() {
     BURST.store(burst, Ordering::Relaxed);
     let t0 = Instant::now();
     let client = reqwest::Client::builder()
-        .user_agent(concat!("humblebrag/", env!("CARGO_PKG_VERSION")))
+        .user_agent(format!("humblebrag/{VERSION}"))
         .pool_max_idle_per_host(conc)
         .timeout(std::time::Duration::from_secs(60))
         .build()

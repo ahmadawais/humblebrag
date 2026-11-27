@@ -118,10 +118,15 @@ cargo build --release
 
 ## Release
 
-1. Set the new version in `Cargo.toml` and commit it.
-2. Tag the commit as `v<version>`, for example `v0.1.0`, and push the tag.
+Run `./scripts/release.sh 0.2.0` on `main`. It does the following:
 
-GitHub Actions builds the five binaries, publishes the six npm packages with provenance, and creates a GitHub release with the binaries attached. The workflow needs an npm token in the `NPM_TOKEN` repository secret.
+1. Logs you in to npm in the browser if needed.
+2. Bumps `Cargo.toml`, commits, tags `v0.2.0`, and pushes.
+3. Waits for GitHub Actions to build the five binaries and attach them to a GitHub release.
+4. Downloads the binaries, checks their checksums, and builds the six npm packages.
+5. Publishes each package. npm asks you to approve in the browser with a passkey or Touch ID.
+
+No npm token is stored in GitHub. Each package is set to require two-factor auth and refuse tokens, so publishing always needs you. Running the script again skips steps that are already done.
 
 ## License
 

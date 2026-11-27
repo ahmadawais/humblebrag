@@ -23,13 +23,13 @@ npm-stat.com runs a Java/Spring backend with a Postgres/Timescale cache and a jQ
 | **Shared 429 gate + pacing** | One 429 pauses every worker instead of digging deeper into a ban |
 | **Creation-date pruning** (registry lookups aren't rate-limited) | Older bulk windows only include packages that existed then. Use `--exact` to turn this off |
 | **Token-bucket pacing** (burst 10, then 0.4 req/s) | Stays under the limit instead of triggering Cloudflare penalty windows |
-| HTTP/2, connection reuse, gzip/brotli, LTO release build | Fast transfers, ~1–2 MB binary |
+| HTTP/2, connection reuse, gzip/brotli, LTO release build | Fast transfers, ~3 MB static binary |
 
 ## Options
 
 ```
 --from YYYY-MM-DD   start date (default 2015-01-10, first day npm has data)
---to   YYYY-MM-DD   end date   (default yesterday)
+--to   YYYY-MM-DD   end date   (default: last day npm has data)
 --json <file>       full JSON (daily totals + per-package monthly)
 --html <file>       self-contained interactive HTML report
 --top <n>           packages to list (default 25)

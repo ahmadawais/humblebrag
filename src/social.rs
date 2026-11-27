@@ -262,7 +262,9 @@ pub fn print(name: &str, stats: &[Stat], gh_followers: Option<u64>) {
     println!("  social · {name}");
     println!("  ─────────────────────────────────────────────");
     let w = stats.iter().map(|s| s.label.chars().count()).max().unwrap_or(0).max(15);
-    for s in stats {
+    let mut sorted: Vec<&Stat> = stats.iter().collect();
+    sorted.sort_by(|a, b| b.value.cmp(&a.value).then(a.label.cmp(&b.label)));
+    for s in sorted {
         let note = match s.note {
             "approx" => " (rounded by the site)",
             "manual" => " (from config)",
@@ -300,7 +302,6 @@ pub fn fill_from_history(stats: &mut Vec<Stat>, sites: &[String], last: &Map<Str
             stats.push(Stat::new(site, v, unit, "last"));
         }
     }
-    stats.sort_by(|a, b| a.site.cmp(&b.site));
 }
 
 /// Write today's numbers (replacing an earlier run today) and return the most

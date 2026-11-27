@@ -1,4 +1,4 @@
-//! humblebrag: npm download stats for a user or a set of packages.
+//! humblebrag: npm downloads and GitHub stars for a user, org, or packages.
 //!
 //! Speed tricks:
 //! * Bulk API: up to 128 unscoped packages × 365 days per request.
@@ -15,6 +15,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+
+mod github;
 
 // CI sets HUMBLEBRAG_VERSION to the release version; local builds use Cargo.toml.
 const VERSION: &str = match option_env!("HUMBLEBRAG_VERSION") {
@@ -310,40 +312,54 @@ async fn package_exists(client: &reqwest::Client, pkg: &str) -> bool {
 
 /// Figure out what the user meant: `~name` = npm user, `@scope/x` or several
 /// names = packages, a single bare name = check both (package wins, with a hint).
-async fn resolve(client: &reqwest::Client, explicit: Option<String>, names: Vec<String>) -> (String, String, Vec<String>) {
-    let die = |e: String| -> ! {
-        eprintln!("{e}");
-        std::process::exit(1)
-    };
+async fn resolve(client: &reqwest::Client, explicit: Option<String>, names: Vec<String>) -> Result<(String, String, Vec<String>), String> {
     let user = |n: &str| n.trim_start_matches('~').to_string();
     match explicit.as_deref() {
         Some("user") => {
             let u = user(&names[0]);
-            let p = user_packages(client, &u).await.unwrap_or_else(|e| die(e));
-            return ("user".into(), u, p);
+            let p = user_packages(client, &u).await?;
+            return Ok(("user".into(), u, p));
         }
-        Some(_) => return ("pkg".into(), names.join(","), names),
+        Some(_) => return Ok(("pkg".into(), names.join(","), names)),
         None => {}
     }
     if names.len() > 1 || names[0].starts_with('@') {
-        return ("pkg".into(), names.join(","), names);
+        return Ok(("pkg".into(), names.join(","), names));
     }
     if names[0].starts_with('~') {
         let u = user(&names[0]);
-        let p = user_packages(client, &u).await.unwrap_or_else(|e| die(e));
-        return ("user".into(), u, p);
+        let p = user_packages(client, &u).await?;
+        return Ok(("user".into(), u, p));
     }
     let n = names[0].clone();
     let (is_pkg, as_user) = tokio::join!(package_exists(client, &n), user_packages(client, &n));
     match (is_pkg, as_user) {
         (true, Ok(p)) => {
-            eprintln!("  {n} is a package (also an npm user with {} packages: humblebrag ~{n})", p.len());
-            ("pkg".into(), n.clone(), vec![n])
+            eprintln!("  {n} is a package (also an npm user with {} packages: humblebrag npm ~{n})", p.len());
+            Ok(("pkg".into(), n.clone(), vec![n]))
         }
-        (true, Err(_)) => ("pkg".into(), n.clone(), vec![n]),
-        (false, Ok(p)) => ("user".into(), n, p),
-        (false, Err(_)) => die(format!("'{n}' is neither an npm package nor an npm user")),
+        (true, Err(_)) => Ok(("pkg".into(), n.clone(), vec![n])),
+        (false, Ok(p)) => Ok(("user".into(), n, p)),
+        (false, Err(_)) => Err(format!("'{n}' is neither an npm package nor an npm user")),
     }
+}
+
+/// GitHub repos (`owner/repo`) named in the packages' `repository` fields.
+async fn package_repos(client: &reqwest::Client, pkgs: &[String]) -> Vec<String> {
+    let found = stream::iter(pkgs.iter().take(50))
+        .map(|p| async move {
+            let url = format!("{REGISTRY}/{}/latest", p.replace('/', "%2F"));
+            let body = get(client, &url).await.ok().flatten()?;
+            let v: serde_json::Value = serde_json::from_slice(&body).ok()?;
+            github::repo_from_npm(&v["repository"])
+        })
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+    let mut out: Vec<String> = found.into_iter().flatten().collect();
+    out.sort_by_key(|r| r.to_lowercase());
+    out.dedup_by_key(|r| r.to_lowercase());
+    out
 }
 
 // ---------- fetch planning ----------
@@ -550,33 +566,57 @@ fn fmt(n: u64) -> String {
 
 fn usage() -> ! {
     eprintln!(
-        "humblebrag: npm download stats for a user or packages
+        "humblebrag (alias: hb): npm downloads and GitHub stars, all time
 
 USAGE:
-  humblebrag <name> [options]          package or user, auto-detected
-  humblebrag ~<user> [options]         force user (all their packages)
-  humblebrag <pkg> <pkg>... [options]  several packages, combined
-  humblebrag user|pkg <name> [options] explicit mode
+  hb <name> [options]              npm + GitHub for a user or package
+  hb npm <name>... [options]       npm downloads only
+  hb gh <login|owner/repo>...      GitHub only: stars, forks, watchers, followers
 
-  Full history (2015-01-10 → latest day npm has) by default.
+  <name> for npm is a package or user, auto-detected. ~<user> forces a user,
+  several names are combined. `hb user <name>` and `hb pkg <name>` still work.
+  For a package, the GitHub part uses its repository from package.json.
 
 OPTIONS:
+  --gh <login|owner/repo>  GitHub target for `hb <name>` when it differs
   --from YYYY-MM-DD   start date (default 2015-01-10, first day npm has data)
   --to   YYYY-MM-DD   end date   (default: latest day npm has data)
-  --json <file>       write full JSON (daily totals + per-package)
+  --json <file>       write full JSON (npm daily totals, per package, GitHub)
   --html <file>       write a self-contained interactive HTML report
-  --top <n>           packages to list (default 25)
+  --top <n>           packages and repos to list (default 25)
   -c <n>              max concurrent requests (default 8)
   --ttl <minutes>     reuse not-yet-final recent days for this long (default 360)
-  --rate <n>          sustained API requests/sec (default 0.4, 0 = unpaced)
+  --rate <n>          sustained npm API requests/sec (default 0.4, 0 = unpaced)
   --burst <n>         initial burst before pacing kicks in (default 10)
   --exact             don't skip windows before a package's first publish
                       (counts downloads of earlier, unpublished owners of a reused name)
   --fresh             refetch recent days now (finalized history still cached)
   --no-cache          ignore and don't write the on-disk cache
-  -V, --version       print version"
+  -V, --version       print version
+
+GITHUB TOKEN:
+  Uses GITHUB_TOKEN, GH_TOKEN, or `gh auth token` when available (5,000
+  requests/hour, watchers included). Without one: 60 requests/hour, no watchers."
     );
     std::process::exit(2)
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum Mode {
+    Both,
+    Npm,
+    Gh,
+}
+
+struct NpmOpts {
+    from: NaiveDate,
+    to: NaiveDate,
+    to_given: bool,
+    top: usize,
+    conc: usize,
+    use_cache: bool,
+    ttl: u64,
+    exact: bool,
 }
 
 #[tokio::main]
@@ -589,9 +629,19 @@ async fn main() {
         println!("humblebrag {VERSION}");
         return;
     }
-    // Optional explicit mode, then names (anything before the first flag).
-    let explicit = matches!(args[0].as_str(), "user" | "pkg").then(|| args[0].clone());
-    let mut i = explicit.is_some() as usize;
+    // Optional mode word, then names (anything before the first flag).
+    let mut i = 0;
+    let mut mode = Mode::Both;
+    match args[0].as_str() {
+        "npm" => (mode, i) = (Mode::Npm, 1),
+        "gh" | "github" => (mode, i) = (Mode::Gh, 1),
+        "user" | "pkg" => mode = Mode::Npm,
+        _ => {}
+    }
+    let explicit = (mode == Mode::Npm && matches!(args.get(i).map(|s| s.as_str()), Some("user" | "pkg"))).then(|| {
+        i += 1;
+        args[i - 1].clone()
+    });
     let mut names: Vec<String> = vec![];
     while i < args.len() && !args[i].starts_with('-') {
         names.extend(args[i].split(|c: char| c == ',' || c.is_whitespace()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
@@ -601,82 +651,186 @@ async fn main() {
         usage();
     }
     let today = Utc::now().date_naive();
-    let mut from = epoch();
-    let mut to = today - Duration::days(1);
-    let mut to_given = false;
+    let mut o = NpmOpts {
+        from: epoch(),
+        to: today - Duration::days(1),
+        to_given: false,
+        top: 25,
+        conc: 8,
+        use_cache: true,
+        ttl: 6 * 3600,
+        exact: false,
+    };
     let (mut json_out, mut html_out) = (None::<String>, None::<String>);
-    let (mut top, mut conc, mut use_cache) = (25usize, 8usize, true);
-    let mut ttl: u64 = 6 * 3600;
     let (mut rate, mut burst) = (DEFAULT_RATE, DEFAULT_BURST);
-    let mut exact = false;
+    let mut gh_override: Option<String> = None;
     while i < args.len() {
         let val = || args.get(i + 1).cloned().unwrap_or_else(|| usage());
         match args[i].as_str() {
-            "--from" => from = parse_date(&val()).unwrap_or_else(|| usage()).max(epoch()),
+            "--gh" => gh_override = Some(val()),
+            "--from" => o.from = parse_date(&val()).unwrap_or_else(|| usage()).max(epoch()),
             "--to" => {
-                to = parse_date(&val()).unwrap_or_else(|| usage());
-                to_given = true;
+                o.to = parse_date(&val()).unwrap_or_else(|| usage());
+                o.to_given = true;
             }
             "--json" => json_out = Some(val()),
             "--html" => html_out = Some(val()),
-            "--top" => top = val().parse().unwrap_or_else(|_| usage()),
-            "-c" => conc = val().parse().unwrap_or_else(|_| usage()),
-            "--ttl" => ttl = val().parse::<u64>().unwrap_or_else(|_| usage()) * 60,
+            "--top" => o.top = val().parse().unwrap_or_else(|_| usage()),
+            "-c" => o.conc = val().parse().unwrap_or_else(|_| usage()),
+            "--ttl" => o.ttl = val().parse::<u64>().unwrap_or_else(|_| usage()) * 60,
             "--rate" => rate = val().parse().unwrap_or_else(|_| usage()),
             "--burst" => burst = val().parse().unwrap_or_else(|_| usage()),
             "--exact" => {
-                exact = true;
+                o.exact = true;
                 i -= 1;
             }
             "--fresh" => {
-                ttl = 0;
+                o.ttl = 0;
                 i -= 1;
             }
             "--no-cache" => {
-                use_cache = false;
+                o.use_cache = false;
                 i -= 1;
             }
             _ => usage(),
         }
         i += 2;
     }
-    if from > to {
+    if o.from > o.to {
         eprintln!("--from is after --to");
         std::process::exit(2);
     }
+    if mode == Mode::Gh && html_out.is_some() {
+        eprintln!("--html needs npm data; use `hb <name>` or `hb npm <name>`");
+        std::process::exit(2);
+    }
 
-    EXACT.store(exact, Ordering::Relaxed);
+    EXACT.store(o.exact, Ordering::Relaxed);
     RATE.store(f64::to_bits(rate), Ordering::Relaxed);
     BURST.store(burst, Ordering::Relaxed);
     let t0 = Instant::now();
     let client = reqwest::Client::builder()
         .user_agent(format!("humblebrag/{VERSION}"))
-        .pool_max_idle_per_host(conc)
+        .pool_max_idle_per_host(o.conc)
         .timeout(std::time::Duration::from_secs(60))
         .build()
         .unwrap();
+    let token = if mode == Mode::Npm { None } else { github::token() };
 
-    // Latest day npm has published (it returns zeros for days not yet processed).
+    // GitHub only.
+    if mode == Mode::Gh {
+        let owners = gh_report(&client, &names, &token, o.top).await;
+        if owners.is_empty() {
+            std::process::exit(1);
+        }
+        if let Some(f) = json_out {
+            std::fs::write(&f, serde_json::to_vec(&serde_json::json!({ "github": github::to_json(&owners) })).unwrap()).expect("write json");
+            eprintln!("  → {f}");
+        }
+        return;
+    }
+
+    // npm: resolve the name(s), then start GitHub alongside the download fetch.
     let last_day = async {
-        if to_given {
+        if o.to_given {
             return None;
         }
-        last_available(&client, ttl.min(3600)).await
+        last_available(&client, o.ttl.min(3600)).await
     };
-    let (last_day, (mode, target, listed)) = tokio::join!(last_day, resolve(&client, explicit, names));
-    let mode = mode.as_str();
+    let (last_day, resolved) = tokio::join!(last_day, resolve(&client, explicit, names.clone()));
     if let Some(d) = last_day {
-        to = d;
+        o.to = d;
     }
+    let npm = match resolved {
+        Ok(r) => Some(r),
+        Err(e) if mode == Mode::Both => {
+            eprintln!("  npm: {e}");
+            None
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1)
+        }
+    };
+    let gh_targets: Vec<String> = match (mode, &gh_override, &npm) {
+        (Mode::Npm, _, _) => vec![],
+        (_, Some(g), _) => vec![g.clone()],
+        (_, None, Some((m, target, _))) if m == "user" => vec![target.clone()],
+        (_, None, Some((_, target, pkgs))) => {
+            let r = package_repos(&client, pkgs).await;
+            if r.is_empty() {
+                eprintln!("  github: no GitHub repository in {target}'s package.json (pass --gh <login|owner/repo>)");
+            }
+            r
+        }
+        (_, None, None) => names.clone(),
+    };
+    let gh_task = {
+        let (client, token) = (client.clone(), token.clone());
+        tokio::spawn(async move { github::fetch(&client, &gh_targets, &token).await })
+    };
+
+    let npm_data = match npm {
+        Some((mode, target, pkgs)) => Some(npm_report(&client, &o, &mode, &target, pkgs, t0).await),
+        None => None,
+    };
+
+    let mut owners = vec![];
+    for r in gh_task.await.unwrap_or_default() {
+        match r {
+            Ok(x) => owners.push(x),
+            Err(e) => eprintln!("  github: {e}"),
+        }
+    }
+    github::print(&owners, o.top, token.is_some());
+    if npm_data.is_none() && owners.is_empty() {
+        std::process::exit(1);
+    }
+
+    if json_out.is_some() || html_out.is_some() {
+        let mut data = npm_data.unwrap_or_else(|| serde_json::json!({}));
+        if !owners.is_empty() {
+            data["github"] = github::to_json(&owners);
+        }
+        if let Some(f) = json_out {
+            std::fs::write(&f, serde_json::to_vec(&data).unwrap()).expect("write json");
+            eprintln!("  → {f}");
+        }
+        if let Some(f) = html_out {
+            if data.get("daily").is_none() {
+                eprintln!("  --html skipped: no npm data");
+            } else {
+                let payload = serde_json::to_string(&data).unwrap().replace("</", "<\\/");
+                std::fs::write(&f, REPORT_HTML.replace("/*__DATA__*/null", &payload)).expect("write html");
+                eprintln!("  → {f}");
+            }
+        }
+    }
+}
+
+async fn gh_report(client: &reqwest::Client, targets: &[String], token: &Option<String>, top: usize) -> Vec<github::Owner> {
+    let mut owners = vec![];
+    for r in github::fetch(client, targets, token).await {
+        match r {
+            Ok(x) => owners.push(x),
+            Err(e) => eprintln!("  github: {e}"),
+        }
+    }
+    github::print(&owners, top, token.is_some());
+    owners
+}
+
+/// Fetch and print npm downloads; returns the JSON data for --json/--html.
+async fn npm_report(client: &reqwest::Client, o: &NpmOpts, mode: &str, target: &str, pkgs: Vec<String>, t0: Instant) -> serde_json::Value {
+    let (from, to, top) = (o.from, o.to, o.top);
     if from > to {
         eprintln!("--from is after the last available day ({to})");
         std::process::exit(2);
     }
-    let pkgs = listed;
     let t_list = t0.elapsed();
     eprintln!("  {} packages ({:.0?})", pkgs.len(), t_list);
 
-    let (series, reqs, hits) = fetch_all(&client, &pkgs, from, to, use_cache, ttl, conc, exact).await;
+    let (series, reqs, hits) = fetch_all(client, &pkgs, from, to, o.use_cache, o.ttl, o.conc, o.exact).await;
     let t_fetch = t0.elapsed();
 
     // Aggregate within [from, to].
@@ -748,24 +902,13 @@ async fn main() {
         t0.elapsed()
     );
 
-    if json_out.is_some() || html_out.is_some() {
-        let data = serde_json::json!({
-            "mode": mode, "target": target,
-            "from": from.to_string(), "to": to.to_string(),
-            "generated": Utc::now().to_rfc3339(),
-            "total": total,
-            "months": months,
-            "daily": daily,
-            "packages": per_pkg.iter().map(|(n, t, m)| serde_json::json!({"name": n, "total": t, "monthly": m})).collect::<Vec<_>>(),
-        });
-        if let Some(f) = json_out {
-            std::fs::write(&f, serde_json::to_vec(&data).unwrap()).expect("write json");
-            eprintln!("  → {f}");
-        }
-        if let Some(f) = html_out {
-            let payload = serde_json::to_string(&data).unwrap().replace("</", "<\\/");
-            std::fs::write(&f, REPORT_HTML.replace("/*__DATA__*/null", &payload)).expect("write html");
-            eprintln!("  → {f}");
-        }
-    }
+    serde_json::json!({
+        "mode": mode, "target": target,
+        "from": from.to_string(), "to": to.to_string(),
+        "generated": Utc::now().to_rfc3339(),
+        "total": total,
+        "months": months,
+        "daily": daily,
+        "packages": per_pkg.iter().map(|(n, t, m)| serde_json::json!({"name": n, "total": t, "monthly": m})).collect::<Vec<_>>(),
+    })
 }

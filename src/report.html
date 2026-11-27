@@ -129,6 +129,11 @@ $('kpis').innerHTML = [
   ['Peak month', mLabel(months[peakMi]), compact.format(allMonthly[peakMi])],
   ['Peak day', peakDay, nf.format(D.daily[peakDi])],
   ['Top package', D.packages[0]?.name||'—', compact.format(D.packages[0]?.total||0)],
+  ...(D.github ? [
+    ['GitHub stars', compact.format(D.github.stars), `${nf.format(D.github.forks)} forks`],
+    ...(D.github.watchers!=null ? [['GitHub watchers', compact.format(D.github.watchers), nf.format(D.github.watchers)]] : []),
+    ...(D.github.followers!=null ? [['GitHub followers', compact.format(D.github.followers), nf.format(D.github.followers)]] : []),
+  ] : []),
 ].map(([l,v,s])=>`<div class="kpi"><div class="l">${l}</div><div class="v">${esc(String(v))}</div><div class="s">${esc(s)}</div></div>`).join('');
 
 // ---------- chart ----------

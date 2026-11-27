@@ -41,13 +41,13 @@ fs.mkdirSync(path.join(pkg, 'bin'), { recursive: true });
 const manifest = {
 	name: 'humblebrag',
 	version: a.version,
-	description: 'How many times have your npm packages been downloaded? All of it, since 2015.',
-	keywords: ['npm', 'downloads', 'stats', 'cli', 'npm-stat'],
+	description: 'All-time npm downloads and GitHub stars, forks, watchers, and followers for a user or package.',
+	keywords: ['npm', 'downloads', 'stats', 'github', 'stars', 'forks', 'cli', 'npm-stat', 'starz'],
 	license: 'MIT',
 	author: 'Ahmad Awais (https://x.com/MrAhmadAwais)',
 	homepage: 'https://github.com/ahmadawais/humblebrag',
 	repository: { type: 'git', url: 'git+https://github.com/ahmadawais/humblebrag.git' },
-	bin: { humblebrag: 'bin/humblebrag.js' },
+	bin: { humblebrag: 'bin/humblebrag.js', hb: 'bin/humblebrag.js' },
 	files: ['bin'],
 	engines: { node: '>=18' },
 };

@@ -1,10 +1,12 @@
 # humblebrag
 
-humblebrag counts every npm download of a package or of all packages by one npm user. It starts at the first day npm recorded downloads and ends at the last day npm has published.
+humblebrag counts every npm download of a package or of all packages by one npm user, and the GitHub stars, forks, watchers, and followers that go with them. npm counts start at the first day npm recorded downloads and end at the last day npm has published.
 
 ```sh
 npx humblebrag ahmadawais
 ```
+
+`hb` is a shorter name for the same command.
 
 ```
   npm downloads · user ahmadawais · 2015-01-10 → 2026-11-25
@@ -31,31 +33,55 @@ npx humblebrag ahmadawais
       15,497,063   17.6%  cli-handle-error
       15,464,833   17.6%  cli-handle-unhandled
       11,668,679   13.3%  cli-check-node
+
+  github · user ahmadawais
+  ─────────────────────────────────────────────
+  stars                     12,820
+  forks                      1,609
+  watchers                     571
+  followers                  7,126
+  repos                        280  (public, not forks)
+
+  top 3 repos
+                  stars     forks  watchers
+  corona-cli      1,833       181        37
+  WPGulp          1,753       285        88
+  Emoji-Log         902        72        15
 ```
 
 ## Usage
 
 ```sh
-npx humblebrag <name>                  # a package or a user, detected for you
-npx humblebrag ~<user>                 # a user, when the name is also a package
-npx humblebrag react vue svelte        # several packages, added together
-npx humblebrag ahmadawais --html report.html --json report.json
+hb <name>                          # npm and GitHub for a user or a package
+hb npm <name>                      # npm downloads only
+hb gh <login>                      # GitHub only: a user or an org
+hb gh <owner/repo>                 # GitHub only: one repo
+hb gh vuejs vitejs                 # several GitHub targets, added together
+hb npm react vue svelte            # several packages, added together
+hb npm ~<user>                     # an npm user, when the name is also a package
+hb ahmadawais --gh AhmadAwais      # GitHub login differs from the npm name
+hb ahmadawais --html report.html --json report.json
 ```
 
-The `--html` file is one self-contained page. It has monthly, yearly, and cumulative charts, and a table of packages you can sort and filter. Click a package to chart it alone.
+Run it with `npx humblebrag`, or install it with `npm i -g humblebrag` to get the `humblebrag` and `hb` commands.
 
-To install it globally, run `npm i -g humblebrag`. The command is then `humblebrag`.
+For an npm user, the GitHub part uses the same login. For a package, it uses the repository in the package's `package.json`. GitHub counts cover public repos the account owns and leave out forks. They match what [starz](https://github.com/yyx990803/starz) and [forkz](https://github.com/ahmadawais/forkz) report, plus watchers and followers.
+
+GitHub allows 60 requests an hour without a token, which is enough for most users but leaves out watchers. humblebrag uses `GITHUB_TOKEN`, `GH_TOKEN`, or the GitHub CLI's login (`gh auth token`) when one is there. The token is only sent to api.github.com.
+
+The `--html` file is one self-contained page. It has monthly, yearly, and cumulative charts, and a table of packages you can sort and filter. Click a package to chart it alone.
 
 When a name is both a package and a user, humblebrag picks the package and prints the command for the user.
 
 ## Options
 
 ```
+--gh <target>       GitHub login or owner/repo, when it differs from the npm name
 --from YYYY-MM-DD   start date (default 2015-01-10, the first day npm has data)
 --to   YYYY-MM-DD   end date (default: the last day npm has data)
---json <file>       write daily totals and per-package monthly totals as JSON
+--json <file>       write npm daily and per-package monthly totals, and GitHub counts, as JSON
 --html <file>       write an interactive HTML report
---top <n>           number of packages to list (default 25)
+--top <n>           number of packages and repos to list (default 25)
 -c <n>              max concurrent requests (default 8)
 --ttl <minutes>     reuse cached recent days for this long (default 360)
 --fresh             fetch recent days again now

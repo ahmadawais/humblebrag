@@ -1,19 +1,16 @@
 #!/usr/bin/env node
 'use strict';
-// Runs the prebuilt binary from the optional package npm installed for this OS and CPU.
+// Runs the prebuilt binary for this OS and CPU, shipped next to this file.
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const path = require('node:path');
 
 const key = `${process.platform}-${process.arch}`;
-const exe = process.platform === 'win32' ? 'humblebrag.exe' : 'humblebrag';
-let bin;
-try {
-	bin = require.resolve(`humblebrag-${key}/bin/${exe}`);
-} catch {
+const bin = path.join(__dirname, `humblebrag-${key}${process.platform === 'win32' ? '.exe' : ''}`);
+if (!fs.existsSync(bin)) {
 	console.error(
 		`humblebrag: no prebuilt binary for ${key}.\n` +
 			'Supported: darwin-arm64, darwin-x64, linux-x64, linux-arm64, win32-x64.\n' +
-			'If you installed with --no-optional or --omit=optional, reinstall without it.\n' +
 			'Build from source: https://github.com/ahmadawais/humblebrag'
 	);
 	process.exit(1);

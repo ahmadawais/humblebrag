@@ -5,8 +5,8 @@
 #   ./scripts/release.sh 0.2.0      bump Cargo.toml to 0.2.0 first, then release
 #
 # Steps: bump and tag, wait for GitHub Actions to build the 5 binaries into a
-# GitHub release, download them, build the 6 npm packages, then publish them
-# with `npm publish`. npm asks you to approve in the browser (passkey or Touch ID).
+# GitHub release, download them, pack them into the one `humblebrag` npm package,
+# then `npm publish` it. npm asks you to approve once in the browser (Touch ID).
 # Safe to run again: it skips anything already tagged, built, or published.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -78,18 +78,12 @@ got=$("$dist/bins/humblebrag-$host" --version)
 [ "$got" = "humblebrag $version" ] || die "downloaded binary says '$got', expected 'humblebrag $version'"
 node scripts/npm-build.mjs --version "$version" --bins "$dist/bins" --out "$dist/pkg"
 
-# 6. Publish platform packages first, then humblebrag.
-say "Publish to npm (approve each one in the browser)"
-for d in "$dist"/pkg/humblebrag-*/ "$dist"/pkg/humblebrag/; do
-	name=$(node -p "require('./$d/package.json').name")
-	if npm view "$name@$version" version >/dev/null 2>&1; then
-		echo "  $name@$version already published"
-		continue
-	fi
-	new=0; npm view "$name" name >/dev/null 2>&1 || new=1
-	npm publish "$d" --access public --auth-type=web
-	# First publish of a name: lock it so only 2FA can publish it, never a token.
-	[ "$new" = 1 ] && npm access set mfa=publish "$name" --auth-type=web
-done
+# 6. Publish. One browser approval.
+if npm view "humblebrag@$version" version >/dev/null 2>&1; then
+	say "humblebrag@$version already on npm"
+else
+	say "Publish humblebrag@$version (approve in the browser)"
+	npm publish "$dist/pkg/humblebrag" --access public --auth-type=web
+fi
 
 say "Done: https://www.npmjs.com/package/humblebrag  (try: npx humblebrag@$version ahmadawais)"

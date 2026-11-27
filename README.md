@@ -95,15 +95,15 @@ A user with many scoped packages takes longer on the first run, because each sco
 
 ## How npx runs a native binary
 
-The `humblebrag` npm package holds a short Node script. It lists five optional dependencies, one per platform, and npm installs only the one that matches your OS and CPU. The script runs that binary.
+The `humblebrag` npm package holds a short Node script and five prebuilt binaries, one per platform. The script picks the one that matches your OS and CPU and runs it.
 
-| npm package | Platform |
+| Binary | Platform |
 |---|---|
 | `humblebrag-darwin-arm64` | macOS on Apple silicon |
 | `humblebrag-darwin-x64` | macOS on Intel |
 | `humblebrag-linux-x64` | Linux x64, static musl build |
 | `humblebrag-linux-arm64` | Linux arm64, static musl build |
-| `humblebrag-win32-x64` | Windows x64 |
+| `humblebrag-win32-x64.exe` | Windows x64 |
 
 ## Build from source
 
@@ -123,10 +123,10 @@ Run `./scripts/release.sh 0.2.0` on `main`. It does the following:
 1. Logs you in to npm in the browser if needed.
 2. Bumps `Cargo.toml`, commits, tags `v0.2.0`, and pushes.
 3. Waits for GitHub Actions to build the five binaries and attach them to a GitHub release.
-4. Downloads the binaries, checks their checksums, and builds the six npm packages.
-5. Publishes each package. npm asks you to approve in the browser with a passkey or Touch ID.
+4. Downloads the binaries, checks their checksums, and packs them into the `humblebrag` npm package.
+5. Publishes it. npm asks you to approve once in the browser with a passkey or Touch ID.
 
-No npm token is stored in GitHub. Each package is set to require two-factor auth and refuse tokens, so publishing always needs you. Running the script again skips steps that are already done.
+No npm token is stored in GitHub, so publishing always needs you. Running the script again skips steps that are already done.
 
 ## License
 

@@ -671,7 +671,7 @@ async fn main() {
     println!();
     println!("  by year");
     let ymax = yearly.values().copied().max().unwrap_or(1).max(1);
-    for (y, v) in &yearly {
+    for (y, v) in yearly.iter().skip_while(|(_, v)| **v == 0) {
         let bar = "█".repeat(((*v as f64 / ymax as f64) * 30.0).round() as usize);
         println!("  {y}  {:>14}  {bar}", fmt(*v));
     }
